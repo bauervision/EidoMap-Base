@@ -1,0 +1,10 @@
+{
+  "name": "EidoMap.Editor",
+  "references": [
+    "EidoMap.Runtime"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "autoReferenced": true
+}
