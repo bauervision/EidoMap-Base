@@ -76,6 +76,19 @@ namespace EidoMap
         public float trimDelaySeconds = 0.35f;
 
         /* ---------------- Internals ---------------- */
+
+        bool ScreenToTilesLocal(Vector2 screen, out Vector2 local)
+        {
+            // Use tilesParent’s space, not mapRoot’s
+            return RectTransformUtility.ScreenPointToLocalPointInRectangle(tilesParent, screen, null, out local);
+        }
+
+        // World-px per UI-px (constant for our mapping)
+        double UiToWorldScale() => (double)WORLD_TILE_PX / (double)displayTilePixels;
+
+
+
+
         const int WORLD_TILE_PX = 256;          // Slippy math uses 256px “world” tiles
 
         private readonly Dictionary<(int, int), RawImage> _tiles = new();
@@ -347,7 +360,9 @@ namespace EidoMap
             var delta = (Vector2)e.position - _dragStart;
             _dragStart = e.position;
 
-            _centerPx = new TileMath.Vector2d(_centerPx.x - delta.x, _centerPx.y + delta.y);
+            double s = UiToWorldScale();
+            _centerPx = new TileMath.Vector2d(_centerPx.x - delta.x * s,
+                                              _centerPx.y + delta.y * s);
 
             var (lat, lon) = TileMath.PixelToLatLon(_centerPx.x, _centerPx.y, zoom);
             centerLat = lat; centerLon = lon;
@@ -375,10 +390,12 @@ namespace EidoMap
                 Vector2 brLocal = rect.anchoredPosition + rect.sizeDelta;
 
                 // Convert to pixel coords relative to center
-                double pxTL = _centerPx.x + tlLocal.x;
-                double pyTL = _centerPx.y - tlLocal.y;
-                double pxBR = _centerPx.x + brLocal.x;
-                double pyBR = _centerPx.y - brLocal.y;
+                double s = UiToWorldScale();
+
+                double pxTL = _centerPx.x + tlLocal.x * s;
+                double pyTL = _centerPx.y - tlLocal.y * s;
+                double pxBR = _centerPx.x + brLocal.x * s;
+                double pyBR = _centerPx.y - brLocal.y * s;
 
                 var (lat1, lon1) = TileMath.PixelToLatLon(pxTL, pyTL, zoom);
                 var (lat2, lon2) = TileMath.PixelToLatLon(pxBR, pyBR, zoom);
@@ -407,6 +424,8 @@ namespace EidoMap
             ZoomBy(delta, e.position); // cursor-centric
         }
 
+
+
         void ZoomBy(int delta, Vector2? screenPos)
         {
             MarkInteracting();
@@ -415,37 +434,52 @@ namespace EidoMap
             int newZ = Mathf.Clamp(zoom + delta, minZoom, maxZoom);
             if (newZ == oldZ) return;
 
-            if (zoomTowardCursor && screenPos.HasValue)
+            // current center in continuous TILE units (not pixels)
+            double cx = _centerPx.x / WORLD_TILE_PX;
+            double cy = _centerPx.y / WORLD_TILE_PX;
+
+            if (zoomTowardCursor && screenPos.HasValue && ScreenToTilesLocal(screenPos.Value, out var local))
             {
-                RectTransformUtility.ScreenPointToLocalPointInRectangle(mapRoot, screenPos.Value, null, out var local);
-                double pxOld = _centerPx.x + local.x;
-                double pyOld = _centerPx.y - local.y;
+                // local (UI) → tile units: each tile is displayTilePixels UI px wide
+                double lx = local.x / displayTilePixels;   // +right
+                double ly = local.y / displayTilePixels;   // +up (UI)
 
-                var (lat, lon) = TileMath.PixelToLatLon(pxOld, pyOld, oldZ);
-                var pNew = TileMath.LatLonToPixel(lat, lon, newZ);
+                // The geo point under the cursor in TILE units at old zoom
+                double uOld = cx + lx;
+                double vOld = cy - ly; // tile Y grows downward, UI Y grows upward
 
-                // New center so that pNew remains under the cursor local point
-                _centerPx = new TileMath.Vector2d(pNew.x - local.x, pNew.y + local.y);
+                // Scale factor between zoom levels (tiles double each +1 zoom)
+                double f = System.Math.Pow(2.0, newZ - oldZ);
+
+                // Same geo point at the new zoom (in TILE units)
+                double uNew = uOld * f;
+                double vNew = vOld * f;
+
+                // Choose new center so that the same screen local stays over the same geo point
+                double cxNew = uNew - lx;
+                double cyNew = vNew + ly;
+
+                _centerPx = new TileMath.Vector2d(cxNew * WORLD_TILE_PX, cyNew * WORLD_TILE_PX);
             }
             else
             {
-                // Keep current geo center
+                // Keep current geo center (no cursor lock)
                 var pNewCenter = TileMath.LatLonToPixel(centerLat, centerLon, newZ);
                 _centerPx = pNewCenter;
             }
 
             zoom = newZ;
 
-            // Keep Inspector in sync
+            // Keep Inspector in sync (optional; doesn’t affect placement)
             var (latC, lonC) = TileMath.PixelToLatLon(_centerPx.x, _centerPx.y, zoom);
             centerLat = latC; centerLon = lonC;
 
-            // Invalidate in-flight loads from previous zoom
+            // Invalidate in-flight loads from previous zoom and request new tiles
             _epoch++;
-
-            // Keep old tiles (visual fallback), request new ones
             RebuildTiles();
         }
+
+
 
         /* ---------------- Cache & helpers ---------------- */
 
