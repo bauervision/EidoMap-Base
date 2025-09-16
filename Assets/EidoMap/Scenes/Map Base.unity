@@ -697,7 +697,7 @@ RectTransform:
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
   m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 100, y: 100}
+  m_SizeDelta: {x: 0, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!1 &782995012
 GameObject:
@@ -1213,7 +1213,7 @@ MonoBehaviour:
   minZoom: 2
   maxZoom: 19
   wheelZoomStep: 1
-  zoomTowardCursor: 1
+  zoomTowardCursor: 0
   zoomInKey: 61
   zoomOutKey: 45
   maxConcurrent: 8
@@ -1225,6 +1225,11 @@ MonoBehaviour:
   parentFallbackDepth: 2
   deferredTrim: 1
   trimDelaySeconds: 0.35
+  debugCrosshair: 1
+  debugZoomLogs: 1
+  preColor: {r: 1, g: 0, b: 0, a: 0.95}
+  postColor: {r: 0, g: 1, b: 0, a: 0.95}
+  crosshairSize: 32
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
