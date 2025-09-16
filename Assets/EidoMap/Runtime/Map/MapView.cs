@@ -37,7 +37,7 @@ namespace EidoMap
         [TextArea] public string imageryUrlTemplate = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 
         [Header("Mapbox (recommended)")]
-        public bool useMapbox = true;
+        public bool useMapbox = false;
         public string mapboxStyleId = "mapbox/satellite-streets-v12"; // e.g., mapbox/satellite-v9, streets-v12
         [TextArea] public string mapboxAccessToken = "<YOUR_MAPBOX_TOKEN>";
         [Tooltip("UI display size per tile; 512 is crisper, 256 is faster")]
@@ -56,6 +56,11 @@ namespace EidoMap
         public bool zoomTowardCursor = true;    // keep the point under the cursor stable
         public KeyCode zoomInKey = KeyCode.Equals;     // (= / + with Shift)
         public KeyCode zoomOutKey = KeyCode.Minus;     // (-)
+
+        [Header("Layout")]
+        public bool autoAlignTilesParent = true;
+        public bool logRectTransforms = true;
+
 
         [Header("Streaming")]
         public int maxConcurrent = 8;           // simultaneous downloads
@@ -80,6 +85,9 @@ namespace EidoMap
         public bool debugZoomLogs = true;
         public Color preColor = new Color(1f, 0f, 0f, 0.95f);
         public Color postColor = new Color(0f, 1f, 0f, 0.95f);
+        public bool debugMouseCross = true;
+        private RectTransform _mouseCH;
+        public Color mouseColor = new Color(0.2f, 0.6f, 1f, 0.95f); // blue
         public float crosshairSize = 14f;
 
         private RectTransform _preCH, _postCH;
@@ -92,17 +100,12 @@ namespace EidoMap
         bool ScreenToTilesLocal(Vector2 screen, out Vector2 local)
         {
             local = default;
-            if (tilesParent == null) return false;
-
-            // Get a world point on the tilesParent plane
-            if (!RectTransformUtility.ScreenPointToWorldPointInRectangle(tilesParent, screen, _uiCam, out var world))
-                return false;
-
-            // Convert that world point to tilesParent local coordinates
-            Vector3 lp = tilesParent.InverseTransformPoint(world);
-            local = new Vector2(lp.x, lp.y);
-            return true;
+            if (!tilesParent) return false;
+            // Canonical: converts screen to *tilesParent local* directly
+            return RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                tilesParent, screen, _uiCam, out local);
         }
+
 
         // UI px -> Mercator "world px" (256px per tile)
         double UiToWorldScale() => (double)WORLD_TILE_PX / (double)displayTilePixels;
@@ -164,6 +167,18 @@ namespace EidoMap
 
             // Initialize centerPx ONCE from inspector values
             _centerPx = TileMath.LatLonToPixel(centerLat, centerLon, zoom);
+
+            if (autoAlignTilesParent && tilesParent && mapRoot)
+            {
+                AlignToParentRect(tilesParent, mapRoot);
+            }
+            if (logRectTransforms)
+            {
+                Debug.Log(RTInfo("mapRoot", mapRoot));
+                Debug.Log(RTInfo("tilesParent", tilesParent));
+            }
+
+
             RebuildTiles();
             EnsureCrosshairs();
         }
@@ -475,8 +490,7 @@ namespace EidoMap
                 }
                 else _preCH.gameObject.SetActive(false);
                 _postCH.gameObject.SetActive(false);
-
-                if (debugCrosshair) BringCrosshairsToFront();
+                BringCrosshairsToFront();
             }
 
             // Capture old zoom & center in TILE units for the projection math
@@ -484,15 +498,17 @@ namespace EidoMap
             double cxOld = _centerPx.x / WORLD_TILE_PX;
             double cyOld = _centerPx.y / WORLD_TILE_PX;
 
-            double lx = haveLocal ? local.x / displayTilePixels : 0.0;
-            double ly = haveLocal ? local.y / displayTilePixels : 0.0;
+            // UI local -> world px -> TILE units
+            double s = UiToWorldScale();                    // 256 / displayTilePixels
+            double lx = haveLocal ? (local.x * s) / WORLD_TILE_PX : 0.0;
+            double ly = haveLocal ? (local.y * s) / WORLD_TILE_PX : 0.0;
 
             // The geo point under the cursor at old zoom, in TILE units
             double uOld = cxOld + lx;
             double vOld = cyOld - ly;
 
-            // Perform the zoom (this updates zoom and _centerPx)
-            ZoomBy(delta, e.position);
+            // Perform the zoom (this updates zoom and _centerPx); pass the same local
+            ZoomBy(delta, e.position, haveLocal ? (Vector2?)local : null);
 
             if (!debugCrosshair || !haveLocal) return;
 
@@ -506,11 +522,12 @@ namespace EidoMap
             double cyNew = _centerPx.y / WORLD_TILE_PX;
 
             // Convert back to tilesParent local (UI) coordinates
-            float lxNew = (float)((uNew - cxNew) * displayTilePixels);
-            float lyNew = (float)((cyNew - vNew) * displayTilePixels);
+            float lxNew = (float)((uNew - cxNew) * WORLD_TILE_PX / s);
+            float lyNew = (float)((cyNew - vNew) * WORLD_TILE_PX / s);
 
             _postCH.anchoredPosition = new Vector2(lxNew, lyNew);
             _postCH.gameObject.SetActive(true);
+
             if (debugZoomLogs)
             {
                 DumpZoomCalc("OnScroll",
@@ -519,12 +536,18 @@ namespace EidoMap
                     local.x, local.y, lx, ly,
                     uOld, vOld, uNew, vNew,
                     cxNew, cyNew);
+                Debug.Log($"[EidoMap:OnScroll:local]{local}");
             }
         }
 
 
-
+        // Back-compat wrapper: callers that don't pass tilesLocalOverride still work
         void ZoomBy(int delta, Vector2? screenPos)
+        {
+            ZoomBy(delta, screenPos, null);
+        }
+
+        void ZoomBy(int delta, Vector2? screenPos, Vector2? tilesLocalOverride)
         {
             MarkInteracting();
 
@@ -536,15 +559,30 @@ namespace EidoMap
             double cx = _centerPx.x / WORLD_TILE_PX;
             double cy = _centerPx.y / WORLD_TILE_PX;
 
-            if (zoomTowardCursor && screenPos.HasValue && ScreenToTilesLocal(screenPos.Value, out var local))
+            // Always initialize; set via override or ScreenToTilesLocal
+            Vector2 local = default;
+            bool haveLocal = false;
+
+            if (tilesLocalOverride.HasValue)
             {
-                // local (UI) → tile units: each tile is displayTilePixels UI px wide
-                double lx = local.x / displayTilePixels;   // +right
-                double ly = local.y / displayTilePixels;   // +up (UI)
+                local = tilesLocalOverride.Value;
+                haveLocal = true;
+            }
+            else if (screenPos.HasValue && ScreenToTilesLocal(screenPos.Value, out local))
+            {
+                haveLocal = true;
+            }
+
+            if (zoomTowardCursor && haveLocal)
+            {
+                // UI local -> world px -> TILE units (match pan math)
+                double s = UiToWorldScale(); // 256 / displayTilePixels
+                double lx = (local.x * s) / WORLD_TILE_PX;
+                double ly = (local.y * s) / WORLD_TILE_PX;
 
                 // The geo point under the cursor in TILE units at old zoom
                 double uOld = cx + lx;
-                double vOld = cy - ly; // tile Y grows downward, UI Y grows upward
+                double vOld = cy - ly;
 
                 // Scale factor between zoom levels (tiles double each +1 zoom)
                 double f = System.Math.Pow(2.0, newZ - oldZ);
@@ -557,24 +595,44 @@ namespace EidoMap
                 double cxNew = uNew - lx;
                 double cyNew = vNew + ly;
 
+                // --- Enforce cursor-lock invariant exactly ---
+                // We want: (uNew - cxNew) == lx  and  (cyNew - vNew) == ly
+                double postLx = uNew - cxNew;
+                double postLy = cyNew - vNew;
+
+                double errX = postLx - lx;
+                double errY = postLy - ly;
+
+                cxNew += errX;
+                cyNew += errY;
+
                 _centerPx = new TileMath.Vector2d(cxNew * WORLD_TILE_PX, cyNew * WORLD_TILE_PX);
 
                 if (debugZoomLogs)
                 {
-                    DumpZoomCalc("ZoomBy",
-                        oldZ, newZ,
-                        cx, cy,
-                        local.x, local.y, lx, ly,
-                        uOld, vOld, uNew, vNew,
-                        cxNew, cyNew);
-                }
+                    var sp = screenPos.HasValue ? screenPos.Value.ToString() : "<none>";
+                    Debug.Log($"[EidoMap:ZoomBy] cursor-lock | oldZ={oldZ} newZ={newZ} local={local} screenPos={sp} s={s}");
+                    Debug.Log($"[EidoMap:ZoomFix] f={f:0.##} lx={lx:0.######} ly={ly:0.######} " +
+                              $"preFixPost=({postLx:0.######},{postLy:0.######}) " +
+                              $"err=({errX:0.######},{errY:0.######}) " +
+                              $"cxNew={cxNew:0.######} cyNew={cyNew:0.######}");
 
+                    // sanity: recompute post-local in tiles after correction
+                    double checkX = (uNew - cxNew);
+                    double checkY = (cyNew - vNew);
+                    Debug.Log($"[EidoMap:ZoomBy:PostCheck] post=({checkX:0.######},{checkY:0.######}) " +
+                              $"shouldEqual lx,ly=({lx:0.######},{ly:0.######}) " +
+                              $"Δ=({(checkX - lx):0.######},{(checkY - ly):0.######})");
+                }
             }
             else
             {
                 // Keep current geo center (no cursor lock)
                 var pNewCenter = TileMath.LatLonToPixel(centerLat, centerLon, newZ);
                 _centerPx = pNewCenter;
+
+                if (debugZoomLogs)
+                    Debug.Log("[EidoMap:ZoomBy] no cursor-lock (no local)");
             }
 
             zoom = newZ;
@@ -587,6 +645,8 @@ namespace EidoMap
             _epoch++;
             RebuildTiles();
         }
+
+
 
 
 
@@ -750,11 +810,17 @@ namespace EidoMap
         void EnsureCrosshairs()
         {
             if (!debugCrosshair || tilesParent == null) return;
-            if (_preCH == null) { _preCH = MakeCrosshair(preColor); _preCH.gameObject.name = "Crosshair_PRE"; }
-            if (_postCH == null) { _postCH = MakeCrosshair(postColor); _postCH.gameObject.name = "Crosshair_POST"; }
-            _preCH.gameObject.SetActive(false);
-            _postCH.gameObject.SetActive(false);
+            if (_preCH == null) { _preCH = MakeCrosshairUnder(tilesParent, preColor, "Cross_PRE"); }
+            if (_postCH == null) { _postCH = MakeCrosshairUnder(tilesParent, postColor, "Cross_POST"); }
+            if (debugMouseCross && _mouseCH == null && mapRoot != null)
+            {
+                _mouseCH = MakeCrosshairUnder(mapRoot, mouseColor, "Cross_MOUSE");
+            }
+            if (_preCH) _preCH.gameObject.SetActive(false);
+            if (_postCH) _postCH.gameObject.SetActive(false);
+            if (_mouseCH) _mouseCH.gameObject.SetActive(false);
         }
+
 
         // small helper for clean logs
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
@@ -780,6 +846,67 @@ namespace EidoMap
 ");
         }
 
+        RectTransform MakeCrosshairUnder(RectTransform parent, Color col, string name)
+        {
+            var go = new GameObject(name, typeof(RectTransform));
+            var rt = go.GetComponent<RectTransform>();
+            rt.SetParent(parent, false);
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = Vector2.zero;
+            rt.sizeDelta = Vector2.zero;
+
+            RectTransform H(string n)
+            {
+                var h = new GameObject(n, typeof(RectTransform), typeof(Image));
+                var r = h.GetComponent<RectTransform>();
+                r.SetParent(rt, false);
+                r.anchorMin = r.anchorMax = r.pivot = new Vector2(0.5f, 0.5f);
+                r.sizeDelta = new Vector2(crosshairSize, 2f);
+                var img = h.GetComponent<Image>();
+                img.color = col;
+                img.raycastTarget = false;
+                return r;
+            }
+            RectTransform V(string n)
+            {
+                var v = new GameObject(n, typeof(RectTransform), typeof(Image));
+                var r = v.GetComponent<RectTransform>();
+                r.SetParent(rt, false);
+                r.anchorMin = r.anchorMax = r.pivot = new Vector2(0.5f, 0.5f);
+                r.sizeDelta = new Vector2(2f, crosshairSize);
+                var img = v.GetComponent<Image>();
+                img.color = col;
+                img.raycastTarget = false;
+                return r;
+            }
+            H("H"); V("V");
+            return rt;
+        }
+
+        static void AlignToParentRect(RectTransform child, RectTransform parent)
+        {
+            if (!child || !parent) return;
+            child.anchorMin = Vector2.zero;
+            child.anchorMax = Vector2.one;
+            child.pivot = new Vector2(0.5f, 0.5f);
+            child.anchoredPosition = Vector2.zero;
+            child.sizeDelta = Vector2.zero;
+            child.localScale = Vector3.one;
+        }
+
+        static string RTInfo(string label, RectTransform rt)
+        {
+            if (!rt) return $"{label}: <null>";
+            var r = rt.rect;
+            return $"{label}: pos={rt.anchoredPosition} sizeΔ={rt.sizeDelta} " +
+                   $"anch=({rt.anchorMin}->{rt.anchorMax}) pivot={rt.pivot} " +
+                   $"rect(w={r.width:0.##},h={r.height:0.##}) scale={rt.localScale}";
+        }
+
+
+
 
     }
+
+
 }

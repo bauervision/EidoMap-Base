@@ -1203,8 +1203,10 @@ MonoBehaviour:
   centerLat: 37.305373
   centerLon: -80.611872
   halfTiles: 2
-  imageryUrlTemplate: https://api.maptiler.com/maps/satellite/256/{z}/{x}/{y}.jpg?key=YOUR_KEY
-  useMapbox: 1
+  imageryUrlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png
+
+'
+  useMapbox: 0
   mapboxStyleId: mapbox/satellite-streets-v12
   mapboxAccessToken: pk.eyJ1IjoiYmF1ZXJ2aXNpb24iLCJhIjoiY2x3dGE4MG93MDFrNjJ3cHZnYTkwcDl6ayJ9.dFAqfwhLvKzrcMl5w-yUcQ
   displayTilePixels: 512
@@ -1213,9 +1215,11 @@ MonoBehaviour:
   minZoom: 2
   maxZoom: 19
   wheelZoomStep: 1
-  zoomTowardCursor: 0
+  zoomTowardCursor: 1
   zoomInKey: 61
   zoomOutKey: 45
+  autoAlignTilesParent: 1
+  logRectTransforms: 1
   maxConcurrent: 8
   prefetchRing: 1
   keepTilesOnZoom: 1
@@ -1229,6 +1233,8 @@ MonoBehaviour:
   debugZoomLogs: 1
   preColor: {r: 1, g: 0, b: 0, a: 0.95}
   postColor: {r: 0, g: 1, b: 0, a: 0.95}
+  debugMouseCross: 1
+  mouseColor: {r: 0.2, g: 0.6, b: 1, a: 0.95}
   crosshairSize: 32
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
