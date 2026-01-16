@@ -1,7 +1,16 @@
 {
-  "name": "EidoMap.Runtime",
-  "autoReferenced": true,
-  "references": [],
-  "includePlatforms": [],
-  "excludePlatforms": []
+    "name": "EidoMap.Runtime",
+    "rootNamespace": "",
+    "references": [
+        ""
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
 }

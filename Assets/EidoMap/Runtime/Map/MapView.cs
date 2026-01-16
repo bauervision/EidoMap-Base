@@ -5,6 +5,8 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.Networking;
 using UnityEngine.UI;
+using EidoMap.Core;
+using EidoMap.Web;
 
 namespace EidoMap
 {
@@ -86,11 +88,11 @@ namespace EidoMap
         public Color preColor = new Color(1f, 0f, 0f, 0.95f);
         public Color postColor = new Color(0f, 1f, 0f, 0.95f);
         public bool debugMouseCross = true;
-        private RectTransform _mouseCH;
+
         public Color mouseColor = new Color(0.2f, 0.6f, 1f, 0.95f); // blue
         public float crosshairSize = 14f;
 
-        private RectTransform _preCH, _postCH;
+
 
 
         /* ---------------- Internals ---------------- */
@@ -108,7 +110,25 @@ namespace EidoMap
 
 
         // UI px -> Mercator "world px" (256px per tile)
-        double UiToWorldScale() => (double)WORLD_TILE_PX / (double)displayTilePixels;
+        double UiToWorldScale()
+        {
+            // PointerEventData.position is in SCREEN PIXELS.
+            // Your tiles are sized in CANVAS UNITS (sizeDelta).
+            // CanvasScaler makes 1 canvas unit = scaleFactor screen pixels.
+            // We need WORLD px per SCREEN px:
+            //   worldPxPerScreenPx = worldPxPerCanvasUnit / screenPxPerCanvasUnit
+            //   = (256 / displayTilePixels) / scaleFactor
+            double sf = (_rootCanvas != null) ? _rootCanvas.scaleFactor : 1.0;
+            if (sf <= 0.0001) sf = 1.0;
+            return WORLD_TILE_PX / (displayTilePixels * sf);
+        }
+
+        double CanvasToScreenScale()
+        {
+            double sf = (_rootCanvas != null) ? _rootCanvas.scaleFactor : 1.0;
+            if (sf <= 0.0001) sf = 1.0;
+            return sf;
+        }
 
 
         private Canvas _rootCanvas;
@@ -116,28 +136,32 @@ namespace EidoMap
 
         const int WORLD_TILE_PX = 256;          // Slippy math uses 256px “world” tiles
 
-        private readonly Dictionary<(int, int), RawImage> _tiles = new();
+        private TileViewPool _tilePool;
         private TileMath.Vector2d _centerPx;
         private Vector2 _dragStart;
         private bool _aoiActive;
         private Vector2 _aoiStartLocal;
         private AoiBounds _lastAoi;
 
-        // Loader queue (main-thread only via coroutines)
-        private readonly Queue<TileJob> _loadQueue = new();
-        private readonly HashSet<string> _loading = new();
-        private Coroutine _pumpCo;
-        private int _activeLoads;
+        private Diagnostics.MapDebugOverlay _dbg;
+
+
+
         private int _epoch;                  // bump to cancel stale loads after zoom
         private bool _interacting;
         private float _lastInteractTime;
+        private readonly HashSet<TileKey> _loading = new();
 
         // Cross-zoom LRU cache
-        private readonly Dictionary<string, Texture2D> _cache = new(); // key: "z/x/y"
-        private readonly LinkedList<string> _lru = new();              // most-recent at front
+        private readonly Dictionary<TileKey, Texture2D> _cache = new();
+        private readonly LinkedList<TileKey> _lru = new();
+        // most-recent at front
+
+        private TileStreamer _streamer;
+
 
         // Deferred trim
-        private HashSet<string> _lastNeededForTrim;
+        private HashSet<TileKey> _lastNeededForTrim;
         private Coroutine _deferredTrimCo;
 
         private struct TileJob { public int x, y, z, epoch; public RawImage img; }
@@ -178,9 +202,18 @@ namespace EidoMap
                 Debug.Log(RTInfo("tilesParent", tilesParent));
             }
 
+            _tilePool = new TileViewPool(tilesParent, displayTilePixels);
+            _streamer = new TileStreamer(this, maxConcurrent);
 
             RebuildTiles();
-            EnsureCrosshairs();
+            if (debugCrosshair && tilesParent != null)
+            {
+                _dbg = new Diagnostics.MapDebugOverlay(tilesParent, mapRoot, crosshairSize);
+                _dbg.Ensure(preColor, postColor, debugMouseCross, mouseColor);
+            }
+
+            Debug.Log($"[EidoMap] canvas.scaleFactor={_rootCanvas?.scaleFactor ?? 1f:0.###} displayTilePixels={displayTilePixels}");
+
         }
 
         void Update()
@@ -210,57 +243,54 @@ namespace EidoMap
 
         void RebuildTiles()
         {
-
-            int n = 1 << zoom;
-
+            // Determine center tile at current zoom
             var (cTileX, cTileY) = TileMath.PixelToTile(_centerPx.x, _centerPx.y);
-            var needed = new HashSet<string>();
 
-            int ring = prefetchRing ? 1 : 0;
-            for (int dx = -halfTiles - ring; dx <= halfTiles + ring; dx++)
-                for (int dy = -halfTiles - ring; dy <= halfTiles + ring; dy++)
+            // Plan which tiles we need (view grid + optional prefetch ring)
+            var needed = new HashSet<TileKey>();
+            TilePlanner.ComputeNeeded(
+                zoom,
+                cTileX,
+                cTileY,
+                halfTiles,
+                prefetchRing,
+                needed
+            );
+
+            // Ensure each needed tile exists, is positioned, and is either shown from cache or enqueued
+            foreach (var tk in needed)
+            {
+                int tx = tk.x;
+                int ty = tk.y;
+
+                // Ensure UI view exists
+                var img = _tilePool.GetOrCreate(tx, ty);
+
+                // Ensure size matches current setting (pool also enforces this)
+                img.rectTransform.sizeDelta = new Vector2(displayTilePixels, displayTilePixels);
+
+                PositionTile(img.rectTransform, tx, ty);
+
+                // Try cache first
+                if (TryGetFromCache(tx, ty, zoom, out var cached))
                 {
-                    int tx = Mod(cTileX + dx, n);
-                    int ty = Mod(cTileY + dy, n);
-                    string kstr = Key(tx, ty, zoom);
-                    needed.Add(kstr);
-
-                    if (!_tiles.TryGetValue((tx, ty), out var img) || img == null)
-                    {
-                        var go = new GameObject($"t_{tx}_{ty}", typeof(RectTransform), typeof(RawImage));
-                        var rt = go.GetComponent<RectTransform>();
-                        rt.SetParent(tilesParent, false);
-                        rt.sizeDelta = new Vector2(displayTilePixels, displayTilePixels);
-
-                        img = go.GetComponent<RawImage>();
-                        img.texture = img.texture != null ? img.texture : Texture2D.blackTexture;
-                        img.raycastTarget = false; // reduce UI raycast cost
-                        _tiles[(tx, ty)] = img;
-                    }
-                    else
-                    {
-                        img.rectTransform.sizeDelta = new Vector2(displayTilePixels, displayTilePixels);
-                    }
-
-                    PositionTile(img.rectTransform, tx, ty);
-
-                    // Try cache first
-                    if (TryGetFromCache(tx, ty, zoom, out var cached))
-                    {
-                        img.uvRect = new Rect(0, 0, 1, 1);
-                        img.texture = cached;
-                    }
-                    else
-                    {
-                        // Parent fallback (cropped UV) while child streams
-                        if (parentFallbackDepth > 0)
-                            TrySetParentFallback(img, tx, ty, zoom, parentFallbackDepth);
-
-                        EnqueueTile(tx, ty, zoom, img);
-                    }
+                    img.uvRect = new Rect(0, 0, 1, 1);
+                    img.texture = cached;
                 }
+                else
+                {
+                    // Parent fallback (cropped UV) while child streams
+                    if (parentFallbackDepth > 0)
+                        TrySetParentFallback(img, tx, ty, zoom, parentFallbackDepth);
 
+                    RequestTile(tx, ty, zoom, img);
+                }
+            }
+
+            // Save needed set for trimming
             _lastNeededForTrim = needed;
+
+            // Trim strategy
             if (deferredTrim)
             {
                 if (_deferredTrimCo != null) StopCoroutine(_deferredTrimCo);
@@ -271,108 +301,159 @@ namespace EidoMap
                 TrimTiles(needed);
             }
 
-            if (debugCrosshair) BringCrosshairsToFront();
+            if (debugCrosshair && _dbg != null) _dbg.BringToFront();
         }
 
-        void TrimTiles(HashSet<string> needed)
+
+
+        void TrimTiles(HashSet<TileKey> needed)
         {
-            var toRemove = new List<(int, int)>();
-            foreach (var kv in _tiles)
-                if (!needed.Contains(Key(kv.Key.Item1, kv.Key.Item2, zoom)))
-                    toRemove.Add(kv.Key);
-
-            foreach (var k in toRemove)
-            {
-                if (_tiles.TryGetValue(k, out var img) && img) Destroy(img.gameObject);
-                _tiles.Remove(k);
-            }
+            if (_tilePool == null) return;
+            _tilePool.Trim(needed, zoom);
         }
+
 
         IEnumerator DeferredTrimAfterSettled()
         {
             yield return new WaitForSeconds(trimDelaySeconds);
-            while (_activeLoads > 0) yield return null; // avoid holes during active loads
+            while (_streamer != null && _streamer.ActiveLoads > 0) yield return null;
             if (_lastNeededForTrim != null) TrimTiles(_lastNeededForTrim);
             _deferredTrimCo = null;
         }
 
         void PositionTile(RectTransform rt, int tx, int ty)
         {
-            Vector2 centerInTiles = new((float)(_centerPx.x / WORLD_TILE_PX),
-                                        (float)(_centerPx.y / WORLD_TILE_PX));
+            int n = 1 << zoom;
 
-            float ox = (tx - centerInTiles.x) * displayTilePixels;
-            float oy = (ty - centerInTiles.y) * displayTilePixels;
+            // continuous center in tile units
+            double cx = _centerPx.x / WORLD_TILE_PX;
+            double cy = _centerPx.y / WORLD_TILE_PX;
 
-            // Invert Y for UI space (up is +Y, but tiles count +Y downward)
-            Vector2 pos = new Vector2(ox, -oy);
-            if (pixelSnap) pos = new Vector2(Mathf.Round(pos.x), Mathf.Round(pos.y));
-            rt.anchoredPosition = pos;
+            // center tile integer (for wrap-relative deltas)
+            int cTileX = (int)System.Math.Floor(cx);
+            int cTileY = (int)System.Math.Floor(cy);
+
+            // shortest wrapped dx,dy in tile units (integer tiles)
+            int dxTiles = WrapDelta(tx - cTileX, n);
+            int dyTiles = WrapDelta(ty - cTileY, n);
+
+            // now incorporate the *fractional* center offset within the tile
+            double fracX = cx - cTileX;
+            double fracY = cy - cTileY;
+
+            // desired position in UI pixels
+            double ox = (dxTiles - fracX) * displayTilePixels;
+            double oy = (dyTiles - fracY) * displayTilePixels;
+
+            // invert Y (UI up, tile down)
+            double px = ox;
+            double py = -oy;
+
+            if (pixelSnap)
+            {
+                px = System.Math.Round(px);
+                py = System.Math.Round(py);
+            }
+
+            rt.anchoredPosition = new Vector2((float)px, (float)py);
         }
+
+        // returns delta in [-n/2, +n/2] range
+        static int WrapDelta(int d, int n)
+        {
+            d %= n;
+            if (d > n / 2) d -= n;
+            if (d < -n / 2) d += n;
+            return d;
+        }
+
 
         /* ---------------- Loader (queue + coroutines) ---------------- */
-
-        void EnqueueTile(int tx, int ty, int z, RawImage img)
+        string GetTileUrl(int tx, int ty, int z)
         {
-            var k = Key(tx, ty, z);
-            if (_loading.Contains(k)) return; // already in-flight
-            _loadQueue.Enqueue(new TileJob { x = tx, y = ty, z = z, img = img, epoch = _epoch });
-            if (_pumpCo == null) _pumpCo = StartCoroutine(LoaderPump());
-        }
-
-        IEnumerator LoaderPump()
-        {
-            while (_loadQueue.Count > 0 || _activeLoads > 0)
+            if (useMapbox)
             {
-                while (_activeLoads < maxConcurrent && _loadQueue.Count > 0)
-                {
-                    var job = _loadQueue.Dequeue();
-                    var key = Key(job.x, job.y, job.z);
-                    if (_loading.Contains(key)) continue;
+                int serverTileSize =
+                    (speedWhileInteracting && _interacting) ? 256 :
+                    (displayTilePixels >= 512 ? 512 : 256);
 
-                    _loading.Add(key);
-                    _activeLoads++;
-                    StartCoroutine(LoadTileCo(job, key));
-                }
-                yield return null;
+                return TileUrlBuilder.BuildMapboxStyleUrl(
+                    mapboxStyleId,
+                    mapboxAccessToken,
+                    tx, ty, z,
+                    serverTileSize
+                );
             }
-            _pumpCo = null;
+
+            return TileUrlBuilder.BuildTemplateUrl(imageryUrlTemplate, tx, ty, z);
         }
 
-        IEnumerator LoadTileCo(TileJob job, string key)
+
+        void RequestTile(int tx, int ty, int z, RawImage img)
         {
-            string url = useMapbox
-                ? BuildMapboxUrl(job.x, job.y, job.z)
-                : imageryUrlTemplate.Replace("{z}", job.z.ToString())
-                                    .Replace("{x}", job.x.ToString())
-                                    .Replace("{y}", job.y.ToString());
+            var key = new TileKey(z, tx, ty);
 
-            using var req = UnityWebRequestTexture.GetTexture(url, true); // nonReadable=true
-#if UNITY_WEBGL
-            req.SetRequestHeader("Cache-Control", "max-age=3600");
-#endif
-            yield return req.SendWebRequest();
-
-            if (req.result == UnityWebRequest.Result.Success)
+            // Avoid requesting if already cached (extra guard)
+            if (TryGetFromCache(tx, ty, z, out var cached))
             {
-                if (job.epoch == _epoch && job.img) // discard stale zoom loads
-                {
-                    var tex = DownloadHandlerTexture.GetContent(req);
-                    tex.wrapMode = TextureWrapMode.Clamp;
-                    tex.filterMode = FilterMode.Bilinear;
-                    job.img.uvRect = new Rect(0, 0, 1, 1);   // reset if parent UV was used
-                    job.img.texture = tex;
-                    PutInCache(job.x, job.y, job.z, tex);
-                }
+                img.uvRect = new Rect(0, 0, 1, 1);
+                img.texture = cached;
+                return;
+            }
+
+            // Build URL (same logic you already validated)
+            string url = GetTileUrl(tx, ty, z);
+
+            if (useMapbox)
+            {
+                int serverTileSize =
+                    (speedWhileInteracting && _interacting) ? 256 :
+                    (displayTilePixels >= 512 ? 512 : 256);
+
+                url = TileUrlBuilder.BuildMapboxStyleUrl(
+                    mapboxStyleId,
+                    mapboxAccessToken,
+                    tx, ty, z,
+                    serverTileSize
+                );
             }
             else
             {
-                Debug.LogWarning($"Tile load failed {url}: {req.error}");
+                url = TileUrlBuilder.BuildTemplateUrl(imageryUrlTemplate, tx, ty, z);
             }
 
-            _loading.Remove(key);
-            _activeLoads--;
+            // Mark as in-flight (mirror old behavior)
+            if (_loading.Contains(key)) return;
+            _loading.Add(key);
+
+            var localEpoch = _epoch;
+
+            _streamer.RequestTile(new EidoMap.Web.TileStreamer.Request
+            {
+                key = key,
+                epoch = localEpoch,
+                url = url,
+                onSuccess = tex =>
+                {
+                    if (localEpoch != _epoch) return;
+                    if (!img) return;
+
+                    img.uvRect = new Rect(0, 0, 1, 1);
+                    img.texture = tex;
+
+                    PutInCache(tx, ty, z, tex);
+                    _loading.Remove(key);
+                },
+                onFail = err =>
+                {
+                    Debug.LogWarning($"Tile load failed {url}: {err}");
+                    _loading.Remove(key);
+                }
+            });
+
         }
+
+
 
         /* ---------------- Input: pan, zoom, AOI ---------------- */
 
@@ -414,21 +495,24 @@ namespace EidoMap
             _dragStart = e.position;
 
             double s = UiToWorldScale();
-            _centerPx = new TileMath.Vector2d(_centerPx.x - delta.x * s,
-                                              _centerPx.y + delta.y * s);
+            _centerPx = MapViewportMath.PanCenterPx(_centerPx, delta.x, delta.y, s);
+
 
             var (lat, lon) = TileMath.PixelToLatLon(_centerPx.x, _centerPx.y, zoom);
             centerLat = lat; centerLon = lon;
 
             // Reposition currently-present tiles (cheap)
-            foreach (var kv in _tiles)
+            if (_tilePool != null)
             {
-                var img = kv.Value;
-                var parts = img.name.Split('_'); // t_x_y
-                int tx = int.Parse(parts[1]);
-                int ty = int.Parse(parts[2]);
-                PositionTile(img.rectTransform, tx, ty);
+                foreach (var kv in _tilePool.Enumerate())
+                {
+                    var (tx, ty) = kv.Key;
+                    var img = kv.Value;
+                    if (!img) continue;
+                    PositionTile(img.rectTransform, tx, ty);
+                }
             }
+
         }
 
         public void OnEndDrag(PointerEventData e)
@@ -442,23 +526,23 @@ namespace EidoMap
                 Vector2 tlLocal = rect.anchoredPosition + new Vector2(0, rect.sizeDelta.y);
                 Vector2 brLocal = rect.anchoredPosition + rect.sizeDelta;
 
-                // Convert to pixel coords relative to center
                 double s = UiToWorldScale();
 
-                double pxTL = _centerPx.x + tlLocal.x * s;
-                double pyTL = _centerPx.y - tlLocal.y * s;
-                double pxBR = _centerPx.x + brLocal.x * s;
-                double pyBR = _centerPx.y - brLocal.y * s;
+                var aoi = AoiMath.ComputeBoundsFromLocalCorners(
+                    _centerPx,
+                    zoom,
+                    tlLocal,
+                    brLocal,
+                    s
+                );
 
-                var (lat1, lon1) = TileMath.PixelToLatLon(pxTL, pyTL, zoom);
-                var (lat2, lon2) = TileMath.PixelToLatLon(pxBR, pyBR, zoom);
-
+                // Keep MapView's public API struct in sync
                 _lastAoi = new AoiBounds
                 {
-                    minLat = Mathf.Min((float)lat1, (float)lat2),
-                    maxLat = Mathf.Max((float)lat1, (float)lat2),
-                    minLon = Mathf.Min((float)lon1, (float)lon2),
-                    maxLon = Mathf.Max((float)lon1, (float)lon2)
+                    minLat = aoi.minLat,
+                    maxLat = aoi.maxLat,
+                    minLon = aoi.minLon,
+                    maxLon = aoi.maxLon
                 };
 
                 Debug.Log($"AOI: lat[{_lastAoi.minLat:F6},{_lastAoi.maxLat:F6}] lon[{_lastAoi.minLon:F6},{_lastAoi.maxLon:F6}]");
@@ -476,69 +560,96 @@ namespace EidoMap
 
             int delta = dy > 0 ? +wheelZoomStep : -wheelZoomStep;
 
-            // --- PRE (red): point we intend to lock ---
+            // Screen -> tilesParent local (canvas units)
             Vector2 local;
             bool haveLocal = ScreenToTilesLocal(e.position, out local);
 
-            if (debugCrosshair)
+            // Debug overlay (pre)
+            if (debugCrosshair && _dbg != null)
             {
-                EnsureCrosshairs();
-                if (haveLocal)
-                {
-                    _preCH.anchoredPosition = local;
-                    _preCH.gameObject.SetActive(true);
-                }
-                else _preCH.gameObject.SetActive(false);
-                _postCH.gameObject.SetActive(false);
-                BringCrosshairsToFront();
+                _dbg.HideAll();
+                if (haveLocal) _dbg.SetPre(local);
+                _dbg.BringToFront();
             }
 
-            // Capture old zoom & center in TILE units for the projection math
-            int oldZ = zoom;
+            // --- PRE: geo under cursor (lat/lon) at OLD zoom ---
+            int zOld = zoom;
+
+            double s = UiToWorldScale(); // world px per UI px (since scaleFactor=1, UI px == screen px)
             double cxOld = _centerPx.x / WORLD_TILE_PX;
             double cyOld = _centerPx.y / WORLD_TILE_PX;
 
-            // UI local -> world px -> TILE units
-            double s = UiToWorldScale();                    // 256 / displayTilePixels
+            // local UI -> tile units
             double lx = haveLocal ? (local.x * s) / WORLD_TILE_PX : 0.0;
             double ly = haveLocal ? (local.y * s) / WORLD_TILE_PX : 0.0;
 
-            // The geo point under the cursor at old zoom, in TILE units
+            // geo point under cursor in TILE units (old zoom)
             double uOld = cxOld + lx;
             double vOld = cyOld - ly;
 
-            // Perform the zoom (this updates zoom and _centerPx); pass the same local
+            double pxOld = uOld * WORLD_TILE_PX;
+            double pyOld = vOld * WORLD_TILE_PX;
+
+            if (haveLocal)
+            {
+                var (latOld, lonOld) = TileMath.PixelToLatLon(pxOld, pyOld, zOld);
+                UnityEngine.Debug.Log($"[EidoMap:CursorGeo PRE] z={zOld} lat={latOld:0.000000} lon={lonOld:0.000000}");
+                if (debugZoomLogs) UnityEngine.Debug.Log($"[EidoMap:OnScroll:local]{local}");
+            }
+
+            // --- ZOOM ---
             ZoomBy(delta, e.position, haveLocal ? (Vector2?)local : null);
 
-            if (!debugCrosshair || !haveLocal) return;
-
-            // --- POST (green): where that same geo ends up after zoom ---
-            int newZ = zoom;
-            double f = System.Math.Pow(2.0, newZ - oldZ); // scale of tiles
-            double uNew = uOld * f;
-            double vNew = vOld * f;
+            // --- POST: geo under cursor (lat/lon) at NEW zoom ---
+            int zNew = zoom;
 
             double cxNew = _centerPx.x / WORLD_TILE_PX;
             double cyNew = _centerPx.y / WORLD_TILE_PX;
 
-            // Convert back to tilesParent local (UI) coordinates
-            float lxNew = (float)((uNew - cxNew) * WORLD_TILE_PX / s);
-            float lyNew = (float)((cyNew - vNew) * WORLD_TILE_PX / s);
+            // recompute local -> tile units at new zoom using same local & same s
+            double lxPost = haveLocal ? (local.x * s) / WORLD_TILE_PX : 0.0;
+            double lyPost = haveLocal ? (local.y * s) / WORLD_TILE_PX : 0.0;
 
-            _postCH.anchoredPosition = new Vector2(lxNew, lyNew);
-            _postCH.gameObject.SetActive(true);
+            double uPost = cxNew + lxPost;
+            double vPost = cyNew - lyPost;
 
-            if (debugZoomLogs)
+            double pxNew = uPost * WORLD_TILE_PX;
+            double pyNew = vPost * WORLD_TILE_PX;
+
+            if (haveLocal)
+            {
+                var (latNew, lonNew) = TileMath.PixelToLatLon(pxNew, pyNew, zNew);
+                UnityEngine.Debug.Log($"[EidoMap:CursorGeo POST] z={zNew} lat={latNew:0.000000} lon={lonNew:0.000000}");
+            }
+
+            // Debug overlay (post) — show where the *old* geo point would land after zoom
+            if (debugCrosshair && _dbg != null && haveLocal)
+            {
+                // Where that same geo ends up after zoom (tile units scale with zoom)
+                double f = System.Math.Pow(2.0, zNew - zOld);
+                double uScaled = uOld * f;
+                double vScaled = vOld * f;
+
+                float lxNew = (float)((uScaled - cxNew) * WORLD_TILE_PX / s);
+                float lyNew = (float)((cyNew - vScaled) * WORLD_TILE_PX / s);
+
+                _dbg.SetPost(new Vector2(lxNew, lyNew));
+                _dbg.BringToFront();
+            }
+
+            // Optional: zoom calc dump (unchanged format)
+            if (debugZoomLogs && haveLocal)
             {
                 DumpZoomCalc("OnScroll",
-                    oldZ, newZ,
+                    zOld, zNew,
                     cxOld, cyOld,
                     local.x, local.y, lx, ly,
-                    uOld, vOld, uNew, vNew,
+                    uOld, vOld, uOld * System.Math.Pow(2.0, zNew - zOld), vOld * System.Math.Pow(2.0, zNew - zOld),
                     cxNew, cyNew);
-                Debug.Log($"[EidoMap:OnScroll:local]{local}");
             }
         }
+
+
 
 
         // Back-compat wrapper: callers that don't pass tilesLocalOverride still work
@@ -576,54 +687,33 @@ namespace EidoMap
             if (zoomTowardCursor && haveLocal)
             {
                 // UI local -> world px -> TILE units (match pan math)
-                double s = UiToWorldScale(); // 256 / displayTilePixels
-                double lx = (local.x * s) / WORLD_TILE_PX;
-                double ly = (local.y * s) / WORLD_TILE_PX;
+                double sf = CanvasToScreenScale();
 
-                // The geo point under the cursor in TILE units at old zoom
-                double uOld = cx + lx;
-                double vOld = cy - ly;
-
-                // Scale factor between zoom levels (tiles double each +1 zoom)
-                double f = System.Math.Pow(2.0, newZ - oldZ);
-
-                // Same geo point at the new zoom (in TILE units)
-                double uNew = uOld * f;
-                double vNew = vOld * f;
-
-                // Choose new center so that the same screen local stays over the same geo point
-                double cxNew = uNew - lx;
-                double cyNew = vNew + ly;
-
-                // --- Enforce cursor-lock invariant exactly ---
-                // We want: (uNew - cxNew) == lx  and  (cyNew - vNew) == ly
-                double postLx = uNew - cxNew;
-                double postLy = cyNew - vNew;
-
-                double errX = postLx - lx;
-                double errY = postLy - ly;
-
-                cxNew += errX;
-                cyNew += errY;
-
-                _centerPx = new TileMath.Vector2d(cxNew * WORLD_TILE_PX, cyNew * WORLD_TILE_PX);
+                _centerPx = MapViewportMath.ZoomCenterPxTowardCursor(
+                    _centerPx,
+                    oldZ,
+                    newZ,
+                    (float)(local.x * sf),   // convert canvas units -> screen px
+                    (float)(local.y * sf),
+                    WORLD_TILE_PX,
+                    UiToWorldScale()         // now truly world px per screen px
+                );
 
                 if (debugZoomLogs)
                 {
-                    var sp = screenPos.HasValue ? screenPos.Value.ToString() : "<none>";
-                    Debug.Log($"[EidoMap:ZoomBy] cursor-lock | oldZ={oldZ} newZ={newZ} local={local} screenPos={sp} s={s}");
-                    Debug.Log($"[EidoMap:ZoomFix] f={f:0.##} lx={lx:0.######} ly={ly:0.######} " +
-                              $"preFixPost=({postLx:0.######},{postLy:0.######}) " +
-                              $"err=({errX:0.######},{errY:0.######}) " +
-                              $"cxNew={cxNew:0.######} cyNew={cyNew:0.######}");
+                    var (errX, errY) = MapViewportMath.CursorLockErrorUiPx(
+                        // old/new centers
+                        new TileMath.Vector2d(cx * WORLD_TILE_PX, cy * WORLD_TILE_PX), // old center in px
+                        _centerPx,
+                        oldZ, newZ,
+                        local.x, local.y,
+                        WORLD_TILE_PX,
+                        sf
+                    );
 
-                    // sanity: recompute post-local in tiles after correction
-                    double checkX = (uNew - cxNew);
-                    double checkY = (cyNew - vNew);
-                    Debug.Log($"[EidoMap:ZoomBy:PostCheck] post=({checkX:0.######},{checkY:0.######}) " +
-                              $"shouldEqual lx,ly=({lx:0.######},{ly:0.######}) " +
-                              $"Δ=({(checkX - lx):0.######},{(checkY - ly):0.######})");
+                    Debug.Log($"[EidoMap:ZoomLockErr UIpx] ({errX:0.###}, {errY:0.###})");
                 }
+
             }
             else
             {
@@ -637,12 +727,18 @@ namespace EidoMap
 
             zoom = newZ;
 
+
             // Keep Inspector in sync (optional; doesn’t affect placement)
             var (latC, lonC) = TileMath.PixelToLatLon(_centerPx.x, _centerPx.y, zoom);
             centerLat = latC; centerLon = lonC;
 
             // Invalidate in-flight loads from previous zoom and request new tiles
             _epoch++;
+            // IMPORTANT: tile views are keyed by (x,y) only; on zoom change those represent different tiles.
+            // Clearing prevents old-zoom textures from being shown in new-zoom positions.
+            if (_tilePool != null)
+                _tilePool.Clear();
+
             RebuildTiles();
         }
 
@@ -651,19 +747,6 @@ namespace EidoMap
 
 
         /* ---------------- Cache & helpers ---------------- */
-
-        string BuildMapboxUrl(int x, int y, int z)
-        {
-            int serverTileSize =
-                (speedWhileInteracting && _interacting) ? 256 :
-                (displayTilePixels >= 512 ? 512 : 256);
-
-            return $"https://api.mapbox.com/styles/v1/{mapboxStyleId}/tiles/{serverTileSize}/{z}/{x}/{y}?access_token={mapboxAccessToken}";
-        }
-
-        string Key(int x, int y, int z) => $"{z}/{x}/{y}";
-
-        static int Mod(int x, int m) { int r = x % m; return r < 0 ? r + m : r; }
 
         private static bool ModKeyDown()
         {
@@ -684,12 +767,10 @@ namespace EidoMap
                 _interacting = false;
         }
 
-        // LRU cache
-        string CacheKey(int x, int y, int z) => $"{z}/{x}/{y}";
 
         bool TryGetFromCache(int x, int y, int z, out Texture2D tex)
         {
-            string k = CacheKey(x, y, z);
+            var k = new TileKey(z, x, y);
             if (_cache.TryGetValue(k, out tex))
             {
                 _lru.Remove(k);
@@ -701,7 +782,8 @@ namespace EidoMap
 
         void PutInCache(int x, int y, int z, Texture2D tex)
         {
-            string k = CacheKey(x, y, z);
+            var k = new TileKey(z, x, y);
+
             if (_cache.ContainsKey(k))
             {
                 _cache[k] = tex;
@@ -715,43 +797,42 @@ namespace EidoMap
 
             while (_lru.Count > maxCachedTiles)
             {
-                string tail = _lru.Last.Value;
+                var tail = _lru.Last.Value;
                 _lru.RemoveLast();
                 _cache.Remove(tail);
-                // Don’t Destroy() texture here—RawImages may still reference it
+                // Don't Destroy() here — RawImages may still reference it.
             }
         }
+
+
+
 
         // Parent fallback: show lower-zoom tile quadrant while child streams
         bool TrySetParentFallback(RawImage img, int x, int y, int z, int maxDepth = 2)
         {
+            var child = new TileKey(z, x, y);
+
             for (int d = 1; d <= maxDepth; d++)
             {
-                int pz = z - d;
-                if (pz < minZoom) break;
+                if (!ParentFallbackResolver.TryResolve(child, d, minZoom, out var res))
+                    break;
 
-                int denom = 1 << d;
-                int px = x >> d;
-                int py = y >> d;
-
-                if (TryGetFromCache(px, py, pz, out var parent))
+                // Cache lookup is still owned by MapView (textures live here)
+                if (_cache.TryGetValue(res.parentKey, out var parentTex) && parentTex != null)
                 {
-                    int cx = x & (denom - 1);
-                    int cy = y & (denom - 1);
+                    // Touch LRU (same behavior as TryGetFromCache)
+                    _lru.Remove(res.parentKey);
+                    _lru.AddFirst(res.parentKey);
 
-                    float subW = 1f / denom;
-                    float subH = 1f / denom;
-                    float u = cx * subW;
-                    // RawImage UV origin bottom-left; tiles +y downward → invert Y
-                    float v = 1f - (cy + 1) * subH;
-
-                    img.texture = parent;
-                    img.uvRect = new Rect(u, v, subW, subH);
+                    img.texture = parentTex;
+                    img.uvRect = res.uv;
                     return true;
                 }
             }
+
             return false;
         }
+
 
         /* ---------------- Types ---------------- */
 
@@ -762,64 +843,7 @@ namespace EidoMap
         }
 
 
-        RectTransform MakeCrosshair(Color col)
-        {
-            var go = new GameObject("Crosshair", typeof(RectTransform));
-            var rt = go.GetComponent<RectTransform>();
-            rt.SetParent(tilesParent, false);
-            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0.5f);
-            rt.anchoredPosition = Vector2.zero;
-            rt.sizeDelta = Vector2.zero; // we position children explicitly
 
-            RectTransform H(string name)
-            {
-                var h = new GameObject(name, typeof(RectTransform), typeof(Image));
-                var r = h.GetComponent<RectTransform>();
-                r.SetParent(rt, false);
-                r.anchorMin = r.anchorMax = r.pivot = new Vector2(0.5f, 0.5f);
-                r.sizeDelta = new Vector2(crosshairSize, 2f);   // thicker = easier to see
-                var img = h.GetComponent<Image>();
-                img.color = col;
-                img.raycastTarget = false;                     // 🔒 do not block scroll
-                return r;
-            }
-
-            RectTransform V(string name)
-            {
-                var v = new GameObject(name, typeof(RectTransform), typeof(Image));
-                var r = v.GetComponent<RectTransform>();
-                r.SetParent(rt, false);
-                r.anchorMin = r.anchorMax = r.pivot = new Vector2(0.5f, 0.5f);
-                r.sizeDelta = new Vector2(2f, crosshairSize);  // thicker
-                var img = v.GetComponent<Image>();
-                img.color = col;
-                img.raycastTarget = false;                     // 🔒 do not block scroll
-                return r;
-            }
-
-            H("H"); V("V");
-            return rt;
-        }
-
-        void BringCrosshairsToFront()
-        {
-            if (_preCH) _preCH.SetAsLastSibling();
-            if (_postCH) _postCH.SetAsLastSibling();
-        }
-
-        void EnsureCrosshairs()
-        {
-            if (!debugCrosshair || tilesParent == null) return;
-            if (_preCH == null) { _preCH = MakeCrosshairUnder(tilesParent, preColor, "Cross_PRE"); }
-            if (_postCH == null) { _postCH = MakeCrosshairUnder(tilesParent, postColor, "Cross_POST"); }
-            if (debugMouseCross && _mouseCH == null && mapRoot != null)
-            {
-                _mouseCH = MakeCrosshairUnder(mapRoot, mouseColor, "Cross_MOUSE");
-            }
-            if (_preCH) _preCH.gameObject.SetActive(false);
-            if (_postCH) _postCH.gameObject.SetActive(false);
-            if (_mouseCH) _mouseCH.gameObject.SetActive(false);
-        }
 
 
         // small helper for clean logs
@@ -846,42 +870,7 @@ namespace EidoMap
 ");
         }
 
-        RectTransform MakeCrosshairUnder(RectTransform parent, Color col, string name)
-        {
-            var go = new GameObject(name, typeof(RectTransform));
-            var rt = go.GetComponent<RectTransform>();
-            rt.SetParent(parent, false);
-            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0.5f);
-            rt.anchoredPosition = Vector2.zero;
-            rt.sizeDelta = Vector2.zero;
 
-            RectTransform H(string n)
-            {
-                var h = new GameObject(n, typeof(RectTransform), typeof(Image));
-                var r = h.GetComponent<RectTransform>();
-                r.SetParent(rt, false);
-                r.anchorMin = r.anchorMax = r.pivot = new Vector2(0.5f, 0.5f);
-                r.sizeDelta = new Vector2(crosshairSize, 2f);
-                var img = h.GetComponent<Image>();
-                img.color = col;
-                img.raycastTarget = false;
-                return r;
-            }
-            RectTransform V(string n)
-            {
-                var v = new GameObject(n, typeof(RectTransform), typeof(Image));
-                var r = v.GetComponent<RectTransform>();
-                r.SetParent(rt, false);
-                r.anchorMin = r.anchorMax = r.pivot = new Vector2(0.5f, 0.5f);
-                r.sizeDelta = new Vector2(2f, crosshairSize);
-                var img = v.GetComponent<Image>();
-                img.color = col;
-                img.raycastTarget = false;
-                return r;
-            }
-            H("H"); V("V");
-            return rt;
-        }
 
         static void AlignToParentRect(RectTransform child, RectTransform parent)
         {
