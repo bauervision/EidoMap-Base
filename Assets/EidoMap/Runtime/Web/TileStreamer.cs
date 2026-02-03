@@ -12,15 +12,17 @@ namespace EidoMap.Web
     /// Coroutine-based tile streaming with:
     /// - request queue
     /// - concurrency cap
-    /// - epoch cancel handled by caller via closures (MapView checks epoch)
+    /// - in-flight keyed by (epoch, tile)
     /// </summary>
     public sealed class TileStreamer
     {
         public struct Request
         {
-            public TileKey key;
-            public int epoch;
+            public TileKey key;         // (z,x,y)
+            public int epoch;           // caller epoch at request time
             public string url;
+
+            // Callbacks MUST be safe to invoke after zoom changes.
             public Action<Texture2D> onSuccess;
             public Action<string> onFail;
         }
@@ -29,7 +31,10 @@ namespace EidoMap.Web
         private readonly int _maxConcurrent;
 
         private readonly Queue<Request> _queue = new();
-        private readonly HashSet<TileKey> _inFlight = new();
+
+        // IMPORTANT: in-flight is per epoch to avoid blocking re-requests after zoom.
+        private readonly HashSet<(int epoch, TileKey key)> _inFlight = new();
+
         private Coroutine _pumpCo;
         private int _active;
 
@@ -45,7 +50,9 @@ namespace EidoMap.Web
         public void RequestTile(Request req)
         {
             if (string.IsNullOrEmpty(req.url)) return;
-            if (_inFlight.Contains(req.key)) return;
+
+            var inflightKey = (req.epoch, req.key);
+            if (_inFlight.Contains(inflightKey)) return;
 
             _queue.Enqueue(req);
             if (_pumpCo == null)
@@ -59,9 +66,11 @@ namespace EidoMap.Web
                 while (_active < _maxConcurrent && _queue.Count > 0)
                 {
                     var req = _queue.Dequeue();
-                    if (_inFlight.Contains(req.key)) continue;
+                    var inflightKey = (req.epoch, req.key);
 
-                    _inFlight.Add(req.key);
+                    if (_inFlight.Contains(inflightKey)) continue;
+
+                    _inFlight.Add(inflightKey);
                     _active++;
                     _host.StartCoroutine(LoadOne(req));
                 }
@@ -73,7 +82,9 @@ namespace EidoMap.Web
 
         private IEnumerator LoadOne(Request req)
         {
-            using var uwr = UnityWebRequestTexture.GetTexture(req.url, true); // nonReadable=true
+            var inflightKey = (req.epoch, req.key);
+
+            using var uwr = UnityWebRequestTexture.GetTexture(req.url, true);
 
 #if UNITY_WEBGL
             uwr.SetRequestHeader("Cache-Control", "max-age=3600");
@@ -81,25 +92,37 @@ namespace EidoMap.Web
 
             yield return uwr.SendWebRequest();
 
-            if (uwr.result == UnityWebRequest.Result.Success)
+            try
             {
-                var tex = DownloadHandlerTexture.GetContent(uwr);
-                tex.wrapMode = TextureWrapMode.Clamp;
-                tex.filterMode = FilterMode.Bilinear;
-                req.onSuccess?.Invoke(tex);
-            }
-            else
-            {
-                req.onFail?.Invoke(uwr.error);
-            }
+                if (uwr.result == UnityWebRequest.Result.Success)
+                {
+                    var tex = DownloadHandlerTexture.GetContent(uwr);
 
-            _inFlight.Remove(req.key);
-            _active--;
+                    // Reduce edge bleeding; keep crispness configurable from caller if needed.
+                    tex.wrapMode = TextureWrapMode.Clamp;
+                    tex.filterMode = FilterMode.Point;
+                    req.onSuccess?.Invoke(tex);
+                }
+                else
+                {
+                    req.onFail?.Invoke(uwr.error);
+                }
+            }
+            finally
+            {
+                _inFlight.Remove(inflightKey);
+                _active--;
+            }
         }
 
         public void ClearQueue()
         {
             _queue.Clear();
+        }
+
+        public void ClearInFlight()
+        {
+            _inFlight.Clear();
         }
     }
 }

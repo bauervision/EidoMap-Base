@@ -41,22 +41,54 @@ namespace EidoMap
         {
             if (_tiles.TryGetValue((x, y), out var img) && img != null)
             {
-                img.rectTransform.sizeDelta = new Vector2(_tilePixels, _tilePixels);
+                var rt0 = img.rectTransform;
+                rt0.sizeDelta = new Vector2(_tilePixels, _tilePixels);
+                rt0.localScale = Vector3.one;
+                rt0.localRotation = Quaternion.identity;
+
+                img.uvRect = new Rect(0, 0, 1, 1);
+                img.enabled = true;
+                img.color = Color.white;
+                img.gameObject.SetActive(true);
+
+                var cr0 = img.GetComponent<CanvasRenderer>();
+                if (cr0) cr0.cullTransparentMesh = false;
+
                 return img;
             }
 
-            var go = new GameObject($"t_{x}_{y}", typeof(RectTransform), typeof(RawImage));
+            var go = new GameObject($"t_{x}_{y}", typeof(RectTransform), typeof(RawImage), typeof(TileViewTag));
+            go.SetActive(true);
+
             var rt = go.GetComponent<RectTransform>();
             rt.SetParent(_tilesParent, false);
+
+            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
+            rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.localScale = Vector3.one;
+            rt.localRotation = Quaternion.identity;
+
             rt.sizeDelta = new Vector2(_tilePixels, _tilePixels);
+            rt.anchoredPosition = Vector2.zero;
 
             img = go.GetComponent<RawImage>();
-            img.texture = img.texture != null ? img.texture : Texture2D.blackTexture;
-            img.raycastTarget = false; // reduce UI raycast cost
+            img.texture = Texture2D.blackTexture;
+            img.uvRect = new Rect(0, 0, 1, 1);
+            img.raycastTarget = false;
+            img.enabled = true;
+            img.color = Color.white;
+
+            var cr = go.GetComponent<CanvasRenderer>();
+            if (cr) cr.cullTransparentMesh = false;
 
             _tiles[(x, y)] = img;
             return img;
         }
+
+
+
+
+
 
         public IEnumerable<KeyValuePair<(int x, int y), RawImage>> Enumerate()
         {
