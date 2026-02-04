@@ -37,10 +37,18 @@ namespace EidoMap
 
                 // Apply to Terrain if assigned.
                 ApplyCapturedTextureToTerrain(tex);
+
+                // Chain: Terrain-RGB → apply height (if enabled + terrain assigned).
+                CaptureAoiTerrainHeight(b);
             }));
         }
 
         private string BuildMapboxStaticImageUrl(AoiBounds b, int w, int h, bool hidpi)
+        {
+            return BuildMapboxStaticImageUrlWithStyle(mapboxStyleId, b, w, h, hidpi);
+        }
+
+        private string BuildMapboxStaticImageUrlWithStyle(string styleId, AoiBounds b, int w, int h, bool hidpi)
         {
             // Mapbox wants [minLon,minLat,maxLon,maxLat] using invariant culture.
             string minLon = b.minLon.ToString(CultureInfo.InvariantCulture);
@@ -51,7 +59,7 @@ namespace EidoMap
             string bbox = $"[{minLon},{minLat},{maxLon},{maxLat}]";
             string size = $"{w}x{h}" + (hidpi ? "@2x" : "");
 
-            return $"https://api.mapbox.com/styles/v1/{mapboxStyleId}/static/{bbox}/{size}?access_token={mapboxAccessToken}";
+            return $"https://api.mapbox.com/styles/v1/{styleId}/static/{bbox}/{size}?access_token={mapboxAccessToken}";
         }
 
         private IEnumerator DownloadTexture(string url, System.Action<Texture2D> onDone)

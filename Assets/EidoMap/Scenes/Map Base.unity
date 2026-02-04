@@ -2388,6 +2388,15 @@ MonoBehaviour:
   parentFallbackDepth: 2
   deferredTrim: 1
   trimDelaySeconds: 0.35
+  applyHeightAfterSatellite: 1
+  terrainRgbZoom: 14
+  terrainRgbUse2xTiles: 1
+  terrainHeightmapResolution: 513
+  heightRangePaddingMeters: 25
+  flipHeightX: 0
+  flipHeightZ: 0
+  heightTargetTerrain: {fileID: 524895228}
+  cloneTerrainDataAtRuntime: 1
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
