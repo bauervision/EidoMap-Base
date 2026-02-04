@@ -2,7 +2,7 @@
     "name": "EidoMap.Runtime",
     "rootNamespace": "",
     "references": [
-        ""
+        "Unity.TextMeshPro"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

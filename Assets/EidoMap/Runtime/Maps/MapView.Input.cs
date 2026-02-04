@@ -43,34 +43,11 @@ namespace EidoMap
 
             _dragStart = e.position;
 
-            if (ModKeyDown() && aoiRect)
-            {
-                _aoiActive = true;
-                RectTransformUtility.ScreenPointToWorldPointInRectangle(mapRoot, e.position, _uiCam, out var w);
-                _aoiStartLocal = mapRoot.InverseTransformPoint(w);
-
-                aoiRect.gameObject.SetActive(true);
-                aoiRect.anchoredPosition = _aoiStartLocal;
-                aoiRect.sizeDelta = Vector2.zero;
-            }
         }
 
         public void OnDrag(PointerEventData e)
         {
             MarkInteracting();
-
-            if (_aoiActive && aoiRect)
-            {
-                RectTransformUtility.ScreenPointToWorldPointInRectangle(mapRoot, e.position, _uiCam, out var w);
-                var now = (Vector2)mapRoot.InverseTransformPoint(w);
-
-                Vector2 min = Vector2.Min(_aoiStartLocal, now);
-                Vector2 max = Vector2.Max(_aoiStartLocal, now);
-
-                aoiRect.anchoredPosition = min;
-                aoiRect.sizeDelta = max - min;
-                return;
-            }
 
             // Pan map: UI +Y up, tile-space +Y down → flip Y once here
             var delta = (Vector2)e.position - _dragStart;
@@ -98,39 +75,6 @@ namespace EidoMap
 
         public void OnEndDrag(PointerEventData e)
         {
-            if (_aoiActive)
-            {
-                _aoiActive = false;
-
-                var rect = aoiRect;
-
-                // Top-left & bottom-right in mapRoot local
-                Vector2 tlLocal = rect.anchoredPosition + new Vector2(0, rect.sizeDelta.y);
-                Vector2 brLocal = rect.anchoredPosition + rect.sizeDelta;
-
-                double s = UiToWorldScale();
-
-                var aoi = AoiMath.ComputeBoundsFromLocalCorners(
-                    _centerPx,
-                    zoom,
-                    tlLocal,
-                    brLocal,
-                    s
-                );
-
-                _lastAoi = new AoiBounds
-                {
-                    minLat = aoi.minLat,
-                    maxLat = aoi.maxLat,
-                    minLon = aoi.minLon,
-                    maxLon = aoi.maxLon
-                };
-
-                Debug.Log($"AOI: lat[{_lastAoi.minLat:F6},{_lastAoi.maxLat:F6}] lon[{_lastAoi.minLon:F6},{_lastAoi.maxLon:F6}]");
-
-                rect.gameObject.SetActive(false);
-            }
-
             // Snap-refresh grid around new center
             RebuildTiles();
         }
@@ -146,13 +90,7 @@ namespace EidoMap
             Vector2 local;
             bool haveLocal = ScreenToTilesLocal(e.position, out local);
 
-            // Debug overlay (pre)
-            if (debugCrosshair && _dbg != null)
-            {
-                _dbg.HideAll();
-                if (haveLocal) _dbg.SetPre(local);
-                _dbg.BringToFront();
-            }
+
 
             // --- PRE: geo under cursor (lat/lon) at OLD zoom ---
             int zOld = zoom;
@@ -160,8 +98,7 @@ namespace EidoMap
             {
                 var cursorPxOld = CursorPixelFromCenterPx(_centerPx, local);
                 var (latOld, lonOld) = TileMath.PixelToLatLon(cursorPxOld.x, cursorPxOld.y, zOld);
-                Debug.Log($"[EidoMap:CursorGeo PRE] z={zOld} lat={latOld:0.000000} lon={lonOld:0.000000}");
-                if (debugZoomLogs) Debug.Log($"[EidoMap:OnScroll:local]{local}");
+
             }
 
             // --- ZOOM ---
@@ -176,11 +113,7 @@ namespace EidoMap
                 Debug.Log($"[EidoMap:CursorGeo POST] z={zNew} lat={latNew:0.000000} lon={lonNew:0.000000}");
             }
 
-            if (debugCrosshair && _dbg != null && haveLocal)
-            {
-                _dbg.SetPost(local);
-                _dbg.BringToFront();
-            }
+
         }
 
         /* ---------------- Zoom core ---------------- */

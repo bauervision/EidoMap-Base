@@ -54,13 +54,6 @@ namespace EidoMap
                 ? TileUrlBuilder.BuildMapboxStyleUrl(mapboxStyleId, mapboxAccessToken, xReq, yReq, z, serverTileSize)
                 : TileUrlBuilder.BuildTemplateUrl(imageryUrlTemplate, xReq, yReq, z);
 
-            if (debugZoomLogs)
-            {
-                var (cTx, cTy) = TileMath.PixelToTile(_centerPx.x, _centerPx.y);
-                if (z == zoom && tx == cTx && ty == cTy)
-                    Debug.Log($"[EidoMap] CENTER TILE z={z} x={xReq} y={yReq} url={url}");
-            }
-
             var loadKey = (localEpoch, key);
             if (_loading.Contains(loadKey)) return;
             _loading.Add(loadKey);

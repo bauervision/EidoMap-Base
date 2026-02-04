@@ -11,7 +11,7 @@ namespace EidoMap
         void RebuildTiles()
         {
             var (cTileX, cTileY) = TileMath.PixelToTile(_centerPx.x, _centerPx.y);
-            Debug.Log($"[EidoMap] centerTile z={zoom} ({cTileX},{cTileY}) centerPx=({_centerPx.x:0.##},{_centerPx.y:0.##})");
+            // Debug.Log($"[EidoMap] centerTile z={zoom} ({cTileX},{cTileY}) centerPx=({_centerPx.x:0.##},{_centerPx.y:0.##})");
 
             var needed = new HashSet<TileKey>();
             TilePlanner.ComputeNeeded(zoom, cTileX, cTileY, halfTiles, prefetchRing, needed);
@@ -53,7 +53,6 @@ namespace EidoMap
             }
             else TrimTiles(needed);
 
-            if (debugCrosshair && _dbg != null) _dbg.BringToFront();
         }
 
         void TrimTiles(HashSet<TileKey> needed)
