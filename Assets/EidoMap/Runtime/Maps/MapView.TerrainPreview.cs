@@ -11,13 +11,14 @@ namespace EidoMap
         {
             if (!tex) return;
 
-            if (!targetTerrain)
+            var t = GetOrCreatePipelineTerrain();
+            if (!t)
             {
-                Debug.LogWarning("[EidoMap] No targetTerrain assigned. Drag a Terrain into MapView.targetTerrain.");
+                Debug.LogWarning("[EidoMap] No targetTerrain assigned and createTerrainIfMissing=false.");
                 return;
             }
 
-            var td = targetTerrain.terrainData;
+            var td = t.terrainData;
             if (!td)
             {
                 Debug.LogWarning("[EidoMap] targetTerrain has no TerrainData.");
@@ -41,16 +42,19 @@ namespace EidoMap
                 layer.name = "AOI Runtime Layer";
             }
 
+            tex.wrapMode = TextureWrapMode.Clamp;
+            tex.filterMode = FilterMode.Bilinear;
+            tex.Apply(false, false);
+
             layer.diffuseTexture = tex;
 
-            // Map across the whole terrain. This will be perfect once terrain size matches AOI meters.
             layer.tileSize = new Vector2(td.size.x, td.size.z);
             layer.tileOffset = Vector2.zero;
 
             td.terrainLayers = new TerrainLayer[] { layer };
 
             td.SetBaseMapDirty();
-            targetTerrain.Flush();
+            t.Flush();
 
             Debug.Log($"[EidoMap] Applied AOI imagery to Terrain. tex={tex.width}x{tex.height} tileSize={layer.tileSize}");
         }

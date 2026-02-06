@@ -137,6 +137,7 @@ namespace EidoMap
             _rootCanvas = mapRoot ? mapRoot.GetComponentInParent<Canvas>() : GetComponentInParent<Canvas>();
             if (_rootCanvas != null)
                 _uiCam = (_rootCanvas.renderMode == RenderMode.ScreenSpaceOverlay) ? null : _rootCanvas.worldCamera;
+
         }
 
         void Start()

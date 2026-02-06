@@ -65,10 +65,16 @@ namespace EidoMap
 
         private void UpdateAoiReadout()
         {
-            if (!aoiReadoutText || !aoiRect || !mapRoot)
+            if (!aoiRect || !mapRoot)
                 return;
 
             AoiBounds b = GetAoiBounds();
+
+            // Update foot-training UI (mask state, capture enabled, max walk time, etc.)
+            UpdateTrainingUiForAoi(b);
+
+            if (!aoiReadoutText)
+                return;
 
             double midLat = (b.minLat + b.maxLat) * 0.5;
             double midLon = (b.minLon + b.maxLon) * 0.5;
