@@ -189,6 +189,9 @@ namespace EidoMap
                 return;
             }
 
+
+            TryBuildForegroundNeighbors(b);
+
             int z = terrainRgbZoom;
             bool use2x = terrainRgbUse2xTiles;
 
