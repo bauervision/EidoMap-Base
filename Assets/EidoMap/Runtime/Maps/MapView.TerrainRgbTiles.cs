@@ -189,9 +189,6 @@ namespace EidoMap
                 return;
             }
 
-
-            TryBuildForegroundNeighbors(b);
-
             int z = terrainRgbZoom;
             bool use2x = terrainRgbUse2xTiles;
 
@@ -203,9 +200,14 @@ namespace EidoMap
                     return;
                 }
 
+                // 1) Center must resize to true AOI meters first
                 ApplyTerrainHeightsFromTerrainRgb(t, mosaic.Value, b);
+
+                // 2) Now neighbors can anchor to center terrain size (no 200x200 collapse)
+                TryBuildForegroundNeighbors(b);
             }));
         }
+
 
         // --------------------------------------------------------------------
         // Terrain-RGB tile mosaic download
@@ -417,9 +419,7 @@ namespace EidoMap
             var td = t.terrainData;
             td.size = new Vector3(aoiWidthMeters, terrainY, aoiHeightMeters);
 
-            int targetRes = ClampPow2Plus1(terrainHeightmapResolution);
-            if (td.heightmapResolution != targetRes)
-                td.heightmapResolution = targetRes;
+
         }
 
         private void EnsureRuntimeTerrainData(Terrain t)
@@ -465,7 +465,14 @@ namespace EidoMap
             return a + (b - a) * t;
         }
 
-        private void ApplyTerrainHeightsFromTerrainRgb(Terrain t, TerrainRgbMosaic mosaic, AoiBounds b)
+
+        private void ApplyTerrainHeightsFromTerrainRgb(
+            Terrain t,
+            TerrainRgbMosaic mosaic,
+            AoiBounds b,
+            float? forceWidthMeters = null,
+            float? forceHeightMeters = null,
+            bool resizeXZ = true)
         {
             if (!t || !t.terrainData || mosaic.tex == null) return;
 
@@ -475,7 +482,10 @@ namespace EidoMap
             mosaic.tex.wrapMode = TextureWrapMode.Clamp;
             mosaic.tex.filterMode = FilterMode.Bilinear;
 
+            // Compute AOI meters, but allow callers (neighbors) to lock all tiles to the center footprint.
             ComputeAoiMeters(b, out float aoiWidthMeters, out float aoiHeightMeters);
+            float widthMeters = forceWidthMeters ?? aoiWidthMeters;
+            float heightMeters = forceHeightMeters ?? aoiHeightMeters;
 
             int hmRes = ClampPow2Plus1(terrainHeightmapResolution);
 
@@ -491,7 +501,9 @@ namespace EidoMap
             int clampCount = 0;
             int totalSamples = hmRes * hmRes;
 
-            bool useRaw = sampleHeightFromRawPixels && mosaic.pixels != null && mosaic.pixels.Length == (mosaic.width * mosaic.height);
+            bool useRaw = sampleHeightFromRawPixels &&
+                          mosaic.pixels != null &&
+                          mosaic.pixels.Length == (mosaic.width * mosaic.height);
 
             // Pass 1: min/max
             for (int zi = 0; zi < hmRes; zi++)
@@ -511,9 +523,9 @@ namespace EidoMap
                     double wx = LonToWorldPx(lon, z, tilePx);
                     double wy = LatToWorldPy(lat, z, tilePx);
 
-                    double mx = wx - worldX0;              // from left
-                    double myTop = wy - worldY0;           // from top
-                    double my = (mosaic.height - 1) - myTop; // convert to bottom-left origin
+                    double mx = wx - worldX0;                 // from left
+                    double myTop = wy - worldY0;              // from top
+                    double my = (mosaic.height - 1) - myTop;  // convert to bottom-left origin
 
                     float u = (float)(mx / (mosaic.width - 1));
                     float v = (float)(my / (mosaic.height - 1));
@@ -557,15 +569,23 @@ namespace EidoMap
 
             float range = (maxM - minM) + Mathf.Max(0f, heightRangePaddingMeters);
 
-            // Resize terrain to AOI meters (and use range as a temporary Y scale).
-            EnsureTerrainSizedToAoiMeters(t, aoiWidthMeters, aoiHeightMeters, range);
+            // Phase Charlie: neighbors should not resize X/Z (to prevent drift/overlap). Y can still be updated via range.
+            if (resizeXZ)
+            {
+                EnsureTerrainSizedToAoiMeters(t, widthMeters, heightMeters, range);
+            }
+            else
+            {
+                var td0 = t.terrainData;
+                EnsureTerrainSizedToAoiMeters(t, td0.size.x, td0.size.z, range);
+            }
 
             // If satellite was applied before we resized, re-sync layer tiling now.
             SyncSatelliteLayerTileSizeToTerrain(t);
 
-            // Helpful debug: meters per sample (if you want it always, keep it; otherwise remove)
-            float mPerSampleX = aoiWidthMeters / (hmRes - 1);
-            float mPerSampleZ = aoiHeightMeters / (hmRes - 1);
+            // Helpful debug: meters per sample
+            float mPerSampleX = widthMeters / (hmRes - 1);
+            float mPerSampleZ = heightMeters / (hmRes - 1);
             Debug.Log($"[EidoMap] meters/sample: {mPerSampleX:0.00} x {mPerSampleZ:0.00}");
 
             float[,] heights = new float[hmRes, hmRes];
@@ -617,10 +637,13 @@ namespace EidoMap
             t.terrainData.SetHeights(0, 0, heights);
 
             Debug.Log(
-                $"[EidoMap] Height OK. AOI meters: {aoiWidthMeters:0.0} x {aoiHeightMeters:0.0}, " +
-                $"min/max: {minM:0.0}..{maxM:0.0}, hmRes: {hmRes}, z: {z}, tilePx: {tilePx}, guardBand={terrainRgbGuardBandTiles}, raw={useRaw}"
+                $"[EidoMap] Height OK. AOI meters(local): {aoiWidthMeters:0.0} x {aoiHeightMeters:0.0}, " +
+                $"AOI meters(used): {widthMeters:0.0} x {heightMeters:0.0}, " +
+                $"min/max: {minM:0.0}..{maxM:0.0}, hmRes: {hmRes}, z: {z}, tilePx: {tilePx}, " +
+                $"guardBand={terrainRgbGuardBandTiles}, raw={useRaw}, resizeXZ={resizeXZ}"
             );
         }
+
 
         private void OnDisable()
         {
