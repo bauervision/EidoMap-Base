@@ -62,6 +62,10 @@ namespace EidoMap
         private TerrainData _runtimeTerrainData;
         private Terrain _createdRuntimeTerrain;
 
+        private float _lastCenterMinMeters = 0f;
+        private float _lastCenterRangeMeters = 0f;
+
+
         private struct TerrainRgbMosaic
         {
             public Texture2D tex;
@@ -466,13 +470,16 @@ namespace EidoMap
         }
 
 
+
         private void ApplyTerrainHeightsFromTerrainRgb(
-            Terrain t,
-            TerrainRgbMosaic mosaic,
-            AoiBounds b,
-            float? forceWidthMeters = null,
-            float? forceHeightMeters = null,
-            bool resizeXZ = true)
+     Terrain t,
+     TerrainRgbMosaic mosaic,
+     AoiBounds b,
+     float? forceWidthMeters = null,
+     float? forceHeightMeters = null,
+     bool resizeXZ = true,
+     float? forceMinMeters = null,
+     float? forceRangeMeters = null)
         {
             if (!t || !t.terrainData || mosaic.tex == null) return;
 
@@ -495,64 +502,100 @@ namespace EidoMap
             double worldX0 = mosaic.xMin * (double)tilePx;
             double worldY0 = mosaic.yMin * (double)tilePx;
 
-            float minM = float.PositiveInfinity;
-            float maxM = float.NegativeInfinity;
-
             int clampCount = 0;
             int totalSamples = hmRes * hmRes;
 
-            bool useRaw = sampleHeightFromRawPixels &&
-                          mosaic.pixels != null &&
-                          mosaic.pixels.Length == (mosaic.width * mosaic.height);
+            bool useRaw =
+                sampleHeightFromRawPixels &&
+                mosaic.pixels != null &&
+                mosaic.pixels.Length == (mosaic.width * mosaic.height);
 
-            // Pass 1: min/max
-            for (int zi = 0; zi < hmRes; zi++)
+            // ------------------------------------------------------------
+            // Determine min/max (or use a forced mapping from center tile)
+            // ------------------------------------------------------------
+
+            bool useForcedRange = forceMinMeters.HasValue && forceRangeMeters.HasValue;
+
+            float minM = 0f;
+            float maxM = 0f;
+
+            if (useForcedRange)
             {
-                float tz = (hmRes <= 1) ? 0f : (zi / (float)(hmRes - 1));
-                if (flipHeightZ) tz = 1f - tz;
+                float forcedMin = forceMinMeters.Value;
+                float forcedRange = forceRangeMeters.Value;
 
-                double lat = LerpD(b.minLat, b.maxLat, tz);
-
-                for (int xi = 0; xi < hmRes; xi++)
+                if (!float.IsFinite(forcedMin) || !float.IsFinite(forcedRange) || forcedRange <= 0.001f)
                 {
-                    float tx = (hmRes <= 1) ? 0f : (xi / (float)(hmRes - 1));
-                    if (flipHeightX) tx = 1f - tx;
+                    Debug.LogWarning("[EidoMap] Forced min/range invalid; falling back to per-tile min/max.");
+                    useForcedRange = false;
+                }
+                else
+                {
+                    minM = forcedMin;
+                    maxM = forcedMin + forcedRange; // for logging/debug only
+                }
+            }
 
-                    double lon = LerpD(b.minLon, b.maxLon, tx);
+            if (!useForcedRange)
+            {
+                minM = float.PositiveInfinity;
+                maxM = float.NegativeInfinity;
 
-                    double wx = LonToWorldPx(lon, z, tilePx);
-                    double wy = LatToWorldPy(lat, z, tilePx);
+                // Pass 1: min/max
+                for (int zi = 0; zi < hmRes; zi++)
+                {
+                    float tz = (hmRes <= 1) ? 0f : (zi / (float)(hmRes - 1));
+                    if (flipHeightZ) tz = 1f - tz;
 
-                    double mx = wx - worldX0;                 // from left
-                    double myTop = wy - worldY0;              // from top
-                    double my = (mosaic.height - 1) - myTop;  // convert to bottom-left origin
+                    double lat = LerpD(b.minLat, b.maxLat, tz);
 
-                    float u = (float)(mx / (mosaic.width - 1));
-                    float v = (float)(my / (mosaic.height - 1));
-
-                    if (debugTerrainRgbClampCounts)
+                    for (int xi = 0; xi < hmRes; xi++)
                     {
-                        if (u < 0f || u > 1f || v < 0f || v > 1f)
-                            clampCount++;
-                    }
+                        float tx = (hmRes <= 1) ? 0f : (xi / (float)(hmRes - 1));
+                        if (flipHeightX) tx = 1f - tx;
 
-                    u = Mathf.Clamp01(u);
-                    v = Mathf.Clamp01(v);
+                        double lon = LerpD(b.minLon, b.maxLon, tx);
 
-                    float m;
-                    if (useRaw)
-                    {
-                        Color32 c32 = SampleRgbNearest(mosaic.pixels, mosaic.width, mosaic.height, u, v);
-                        m = DecodeTerrainRgbMeters(c32);
-                    }
-                    else
-                    {
-                        Color c = mosaic.tex.GetPixelBilinear(u, v);
-                        m = DecodeTerrainRgbMeters((Color32)c);
-                    }
+                        double wx = LonToWorldPx(lon, z, tilePx);
+                        double wy = LatToWorldPy(lat, z, tilePx);
 
-                    if (m < minM) minM = m;
-                    if (m > maxM) maxM = m;
+                        double mx = wx - worldX0;                 // from left
+                        double myTop = wy - worldY0;              // from top
+                        double my = (mosaic.height - 1) - myTop;  // convert to bottom-left origin
+
+                        float u = (float)(mx / (mosaic.width - 1));
+                        float v = (float)(my / (mosaic.height - 1));
+
+                        if (debugTerrainRgbClampCounts)
+                        {
+                            if (u < 0f || u > 1f || v < 0f || v > 1f)
+                                clampCount++;
+                        }
+
+                        u = Mathf.Clamp01(u);
+                        v = Mathf.Clamp01(v);
+
+                        float m;
+                        if (useRaw)
+                        {
+                            Color32 c32 = SampleRgbNearest(mosaic.pixels, mosaic.width, mosaic.height, u, v);
+                            m = DecodeTerrainRgbMeters(c32);
+                        }
+                        else
+                        {
+                            Color c = mosaic.tex.GetPixelBilinear(u, v);
+                            m = DecodeTerrainRgbMeters((Color32)c);
+                        }
+
+                        if (m < minM) minM = m;
+                        if (m > maxM) maxM = m;
+                    }
+                }
+
+                if (!float.IsFinite(minM) || !float.IsFinite(maxM) || maxM <= minM)
+                {
+                    Debug.LogWarning("[EidoMap] Terrain-RGB decode produced invalid min/max. Skipping SetHeights.");
+                    return;
                 }
             }
 
@@ -561,13 +604,17 @@ namespace EidoMap
                 Debug.Log($"[EidoMap] Terrain-RGB sampling clamps: {clampCount}/{totalSamples} (guardBand={terrainRgbGuardBandTiles})");
             }
 
-            if (!float.IsFinite(minM) || !float.IsFinite(maxM) || maxM <= minM)
-            {
-                Debug.LogWarning("[EidoMap] Terrain-RGB decode produced invalid min/max. Skipping SetHeights.");
-                return;
-            }
+            float range = useForcedRange
+                ? Mathf.Max(0.001f, forceRangeMeters.Value)
+                : (maxM - minM) + Mathf.Max(0f, heightRangePaddingMeters);
 
-            float range = (maxM - minM) + Mathf.Max(0f, heightRangePaddingMeters);
+            // If this is the main pipeline terrain, remember its mapping for neighbors.
+            if (t == targetTerrain)
+            {
+                _lastCenterMinMeters = minM;
+                _lastCenterRangeMeters = range;
+                Debug.Log($"[EidoMap] Center mapping: min={_lastCenterMinMeters:0.0} range={_lastCenterRangeMeters:0.0}");
+            }
 
             // Phase Charlie: neighbors should not resize X/Z (to prevent drift/overlap). Y can still be updated via range.
             if (resizeXZ)
@@ -590,7 +637,9 @@ namespace EidoMap
 
             float[,] heights = new float[hmRes, hmRes];
 
-            // Pass 2: fill heights
+            // ------------------------------------------------------------
+            // Pass 2: fill heights using the chosen (minM, range) mapping
+            // ------------------------------------------------------------
             for (int zi = 0; zi < hmRes; zi++)
             {
                 float tz = (hmRes <= 1) ? 0f : (zi / (float)(hmRes - 1));
@@ -640,9 +689,10 @@ namespace EidoMap
                 $"[EidoMap] Height OK. AOI meters(local): {aoiWidthMeters:0.0} x {aoiHeightMeters:0.0}, " +
                 $"AOI meters(used): {widthMeters:0.0} x {heightMeters:0.0}, " +
                 $"min/max: {minM:0.0}..{maxM:0.0}, hmRes: {hmRes}, z: {z}, tilePx: {tilePx}, " +
-                $"guardBand={terrainRgbGuardBandTiles}, raw={useRaw}, resizeXZ={resizeXZ}"
+                $"guardBand={terrainRgbGuardBandTiles}, raw={useRaw}, resizeXZ={resizeXZ}, forced={useForcedRange}"
             );
         }
+
 
 
         private void OnDisable()

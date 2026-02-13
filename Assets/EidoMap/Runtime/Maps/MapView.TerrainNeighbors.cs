@@ -61,290 +61,303 @@ namespace EidoMap
             StartCoroutine(BuildForegroundNeighborsCoroutine(center, ring));
         }
 
+
         private IEnumerator BuildForegroundNeighborsCoroutine(AoiBounds center, int ring)
-{
-    var root = GetOrCreateForegroundRoot();
-    if (!root) yield break;
-
-    if (rebuildForegroundEachCapture)
-    {
-        for (int i = root.childCount - 1; i >= 0; i--)
         {
-            var child = root.GetChild(i);
-            if (child) DestroyGameObjectSafe(child.gameObject);
-        }
-    }
+            var root = GetOrCreateForegroundRoot();
+            if (!root) yield break;
 
-    // Center terrain footprint is the single source of truth (prevents drift).
-    var tCenter = GetOrCreatePipelineTerrain();
-    if (!tCenter || !tCenter.terrainData) yield break;
-
-    float tileWidthMeters = tCenter.terrainData.size.x;
-    float tileHeightMeters = tCenter.terrainData.size.z;
-
-    int ringClamped = Mathf.Clamp(ring, 1, 4);
-
-    int z = terrainRgbZoom;
-    int tilePx = terrainRgbUse2xTiles ? 512 : 256;
-
-    double cx0 = LonToWorldPx(center.minLon, z, tilePx);
-    double cx1 = LonToWorldPx(center.maxLon, z, tilePx);
-
-    // WebMercator: worldY increases southward.
-    double cyN = LatToWorldPy(center.maxLat, z, tilePx);
-    double cyS = LatToWorldPy(center.minLat, z, tilePx);
-
-    double wPx = cx1 - cx0;
-    double hPx = cyS - cyN;
-
-    if (!(wPx > 1.0) || !(hPx > 1.0))
-    {
-        Debug.LogWarning("[EidoMap] Foreground neighbors: AOI pixel width/height invalid.");
-        yield break;
-    }
-
-    var terrains = new Dictionary<NeighborKey, Terrain>();
-
-    // Create all neighbor terrains first (correct spacing).
-    for (int gz = -ringClamped; gz <= ringClamped; gz++)
-    {
-        for (int gx = -ringClamped; gx <= ringClamped; gx++)
-        {
-            if (gx == 0 && gz == 0) continue;
-
-            var key = new NeighborKey(gx, gz);
-
-            var existing = root.Find(TileName(key));
-            if (existing)
+            if (rebuildForegroundEachCapture)
             {
-                var et = existing.GetComponent<Terrain>();
-                if (et) terrains[key] = et;
-                continue;
+                for (int i = root.childCount - 1; i >= 0; i--)
+                {
+                    var child = root.GetChild(i);
+                    if (child) DestroyGameObjectSafe(child.gameObject);
+                }
             }
 
-            var t = CreateNeighborTerrain(root, key, tileWidthMeters, tileHeightMeters);
-            if (t) terrains[key] = t;
-        }
-    }
+            // Center terrain footprint is the single source of truth (prevents drift).
+            var tCenter = GetOrCreatePipelineTerrain();
+            if (!tCenter || !tCenter.terrainData) yield break;
 
-    // For each neighbor:
-    // 1) compute bounds
-    // 2) download Terrain-RGB mosaic and apply heights (already in place)
-    // 3) download satellite diffuse for that same bounds and apply unique TerrainLayer
-    foreach (var kv in terrains)
-    {
-        NeighborKey key = kv.Key;
-        Terrain t = kv.Value;
-        if (!t || !t.terrainData) continue;
+            float tileWidthMeters = tCenter.terrainData.size.x;
+            float tileHeightMeters = tCenter.terrainData.size.z;
 
-        double nx0 = cx0 + (key.gx * wPx);
-        double nx1 = cx1 + (key.gx * wPx);
+            float tileYMeters = tCenter.terrainData.size.y;
+            int centerRes = tCenter.terrainData.heightmapResolution;
 
-        // gz positive means "north" in Unity +Z; north is smaller worldY.
-        double nyN = cyN + (-key.gz * hPx);
-        double nyS = cyS + (-key.gz * hPx);
+            int ringClamped = Mathf.Clamp(ring, 1, 4);
 
-        var nb = new AoiBounds
-        {
-            minLon = (float)WorldPxToLon(nx0, z, tilePx),
-            maxLon = (float)WorldPxToLon(nx1, z, tilePx),
+            int z = terrainRgbZoom;
+            int tilePx = terrainRgbUse2xTiles ? 512 : 256;
 
-            maxLat = (float)WorldPyToLat(nyN, z, tilePx),
-            minLat = (float)WorldPyToLat(nyS, z, tilePx),
-        };
+            double cx0 = LonToWorldPx(center.minLon, z, tilePx);
+            double cx1 = LonToWorldPx(center.maxLon, z, tilePx);
 
-        // -----------------------------
-        // Height (Terrain-RGB)
-        // -----------------------------
-        bool heightDone = false;
-        bool heightOk = false;
+            // WebMercator: worldY increases southward.
+            double cyN = LatToWorldPy(center.maxLat, z, tilePx);
+            double cyS = LatToWorldPy(center.minLat, z, tilePx);
 
-        yield return DownloadTerrainRgbMosaic(nb, z, terrainRgbUse2xTiles, mosaic =>
-        {
-            if (!mosaic.HasValue)
+            double wPx = cx1 - cx0;
+            double hPx = cyS - cyN;
+
+            if (!(wPx > 1.0) || !(hPx > 1.0))
             {
-                heightDone = true;
-                heightOk = false;
-                return;
+                Debug.LogWarning("[EidoMap] Foreground neighbors: AOI pixel width/height invalid.");
+                yield break;
             }
 
-            ApplyTerrainHeightsFromTerrainRgb(
-                t,
-                mosaic.Value,
-                nb,
-                forceWidthMeters: tileWidthMeters,
-                forceHeightMeters: tileHeightMeters,
-                resizeXZ: false);
+            var terrains = new Dictionary<NeighborKey, Terrain>();
 
-            heightDone = true;
-            heightOk = true;
-        });
-
-        while (!heightDone) yield return null;
-
-        if (!heightOk)
-        {
-            Debug.LogWarning($"[EidoMap] Foreground neighbor {key} height failed; stopping neighbor build.");
-            yield break;
-        }
-
-        // -----------------------------
-        // Satellite diffuse (unique per tile)
-        // -----------------------------
-        bool satDone = false;
-        Texture2D sat = null;
-
-        yield return DownloadSatelliteTextureForBounds(nb, 1024, tex =>
-        {
-            sat = tex;
-            satDone = true;
-        });
-
-        while (!satDone) yield return null;
-
-        if (!sat)
-        {
-            Debug.LogWarning($"[EidoMap] Foreground neighbor {key} satellite failed; stopping neighbor build.");
-            yield break;
-        }
-
-        ApplyUniqueSatelliteLayerToTerrain(t, sat);
-    }
-
-    if (setNeighborsAfterBuild)
-    {
-        ApplyUnityNeighborsForForeground(terrains);
-        TrySetCenterNeighbors(terrains);
-    }
-
-    if (stitchForegroundEdges)
-        StitchForegroundEdges(terrains);
-
-    Debug.Log("[EidoMap] Foreground neighbors complete.");
-}
-
-private IEnumerator DownloadSatelliteTextureForBounds(AoiBounds b, int sizePx, Action<Texture2D> onDone)
-{
-    // Use the exact style you use for your center capture if different.
-    // This default is Mapbox satellite.
-    const string style = "mapbox/satellite-v9";
-
-    string bbox =
-        $"{b.minLon.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
-        $"{b.minLat.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
-        $"{b.maxLon.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
-        $"{b.maxLat.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
-
-    string url =
-        $"https://api.mapbox.com/styles/v1/{style}/static/" +
-        $"[{bbox}]/{sizePx}x{sizePx}?access_token={mapboxAccessToken}";
-
-    using (var req = UnityWebRequestTexture.GetTexture(url, true))
-    {
-        yield return req.SendWebRequest();
-
-        if (req.result != UnityWebRequest.Result.Success)
-        {
-            Debug.LogWarning($"[EidoMap] Satellite download failed: {req.error}");
-            onDone?.Invoke(null);
-            yield break;
-        }
-
-        var tex = DownloadHandlerTexture.GetContent(req);
-        if (!tex)
-        {
-            onDone?.Invoke(null);
-            yield break;
-        }
-
-        tex.wrapMode = TextureWrapMode.Clamp;
-        tex.filterMode = FilterMode.Bilinear;
-
-        onDone?.Invoke(tex);
-    }
-}
-
-private void ApplyUniqueSatelliteLayerToTerrain(Terrain t, Texture2D sat)
-{
-    if (!t || !t.terrainData || !sat) return;
-
-    var td = t.terrainData;
-
-    var layer = new TerrainLayer();
-
-    layer.diffuseTexture = sat;
-    layer.tileSize = new Vector2(td.size.x, td.size.z);
-    layer.tileOffset = Vector2.zero;
-
-    td.terrainLayers = new[] { layer };
-    td.SetBaseMapDirty();
-    t.Flush();
-}
-
-
-private IEnumerator DebugLockForegroundForSeconds(
-    Transform root,
-    float tileW,
-    float tileH,
-    float seconds)
-{
-    float tEnd = Time.time + seconds;
-
-    // Snapshot initial parent scale (if this changes, everything shifts).
-    Vector3 parentScale0 = root.lossyScale;
-
-    while (Time.time < tEnd)
-    {
-        if (!root) yield break;
-
-        // If parent scale changes over time, it will cause “overlap” symptoms.
-        if ((root.lossyScale - parentScale0).sqrMagnitude > 0.000001f)
-        {
-            Debug.LogWarning($"[EidoMap] Foreground parent lossyScale changed: {parentScale0} -> {root.lossyScale}");
-            parentScale0 = root.lossyScale;
-        }
-
-        for (int i = 0; i < root.childCount; i++)
-        {
-            var child = root.GetChild(i);
-            if (!child) continue;
-
-            var terr = child.GetComponent<Terrain>();
-            if (!terr || !terr.terrainData) continue;
-
-            // Name format: Tile_gx_gz
-            // Only lock if it matches expected.
-            string n = child.name;
-            if (!n.StartsWith("Tile_")) continue;
-
-            // Parse gx/gz
-            // Tile_-1_0
-            var parts = n.Split('_');
-            if (parts.Length != 3) continue;
-            if (!int.TryParse(parts[1], out int gx)) continue;
-            if (!int.TryParse(parts[2], out int gz)) continue;
-
-            // Hard-lock position
-            Vector3 wantedPos = new Vector3(gx * tileW, 0f, gz * tileH);
-            if ((child.localPosition - wantedPos).sqrMagnitude > 0.0001f)
+            // Create all neighbor terrains first (correct spacing).
+            for (int gz = -ringClamped; gz <= ringClamped; gz++)
             {
-                Debug.LogWarning($"[EidoMap] Tile {n} moved: {child.localPosition} -> {wantedPos}");
-                child.localPosition = wantedPos;
+                for (int gx = -ringClamped; gx <= ringClamped; gx++)
+                {
+                    if (gx == 0 && gz == 0) continue;
+
+                    var key = new NeighborKey(gx, gz);
+
+                    var existing = root.Find(TileName(key));
+                    if (existing)
+                    {
+                        var et = existing.GetComponent<Terrain>();
+                        if (et) terrains[key] = et;
+                        continue;
+                    }
+
+                    var t = CreateNeighborTerrain(root, key, tileWidthMeters, tileHeightMeters, tileYMeters, centerRes);
+
+                    if (t) terrains[key] = t;
+                }
             }
 
-            // Hard-lock size (X/Z only)
-            var td = terr.terrainData;
-            var sz = td.size;
-            if (Mathf.Abs(sz.x - tileW) > 0.01f || Mathf.Abs(sz.z - tileH) > 0.01f)
+            // For each neighbor:
+            // 1) compute bounds
+            // 2) download Terrain-RGB mosaic and apply heights (already in place)
+            // 3) download satellite diffuse for that same bounds and apply unique TerrainLayer
+            foreach (var kv in terrains)
             {
-                Debug.LogWarning($"[EidoMap] Tile {n} size changed: {sz} -> ({tileW}, {sz.y}, {tileH})");
-                td.size = new Vector3(tileW, sz.y, tileH);
+                NeighborKey key = kv.Key;
+                Terrain t = kv.Value;
+                if (!t || !t.terrainData) continue;
+
+                double nx0 = cx0 + (key.gx * wPx);
+                double nx1 = cx1 + (key.gx * wPx);
+
+                // gz positive means "north" in Unity +Z; north is smaller worldY.
+                double nyN = cyN + (-key.gz * hPx);
+                double nyS = cyS + (-key.gz * hPx);
+
+                var nb = new AoiBounds
+                {
+                    minLon = (float)WorldPxToLon(nx0, z, tilePx),
+                    maxLon = (float)WorldPxToLon(nx1, z, tilePx),
+
+                    maxLat = (float)WorldPyToLat(nyN, z, tilePx),
+                    minLat = (float)WorldPyToLat(nyS, z, tilePx),
+                };
+
+                // -----------------------------
+                // Height (Terrain-RGB)
+                // -----------------------------
+                bool heightDone = false;
+                bool heightOk = false;
+
+
+
+                yield return DownloadTerrainRgbMosaic(nb, z, terrainRgbUse2xTiles, mosaic =>
+                {
+                    if (!mosaic.HasValue)
+                    {
+                        heightDone = true;
+                        heightOk = false;
+                        return;
+                    }
+
+
+                    bool haveCenterMapping = _lastCenterRangeMeters > 0.001f;
+
+                    ApplyTerrainHeightsFromTerrainRgb(
+                        t,
+                        mosaic.Value,
+                        nb,
+                        forceWidthMeters: tileWidthMeters,
+                        forceHeightMeters: tileHeightMeters,
+                        resizeXZ: false,
+                        forceMinMeters: haveCenterMapping ? _lastCenterMinMeters : (float?)null,
+                        forceRangeMeters: haveCenterMapping ? _lastCenterRangeMeters : (float?)null
+                    );
+
+                    heightDone = true;
+                    heightOk = true;
+                });
+
+                while (!heightDone) yield return null;
+
+                if (!heightOk)
+                {
+                    Debug.LogWarning($"[EidoMap] Foreground neighbor {key} height failed; stopping neighbor build.");
+                    yield break;
+                }
+
+                // -----------------------------
+                // Satellite diffuse (unique per tile)
+                // -----------------------------
+                bool satDone = false;
+                Texture2D sat = null;
+
+                yield return DownloadSatelliteTextureForBounds(nb, 1024, tex =>
+                {
+                    sat = tex;
+                    satDone = true;
+                });
+
+                while (!satDone) yield return null;
+
+                if (!sat)
+                {
+                    Debug.LogWarning($"[EidoMap] Foreground neighbor {key} satellite failed; stopping neighbor build.");
+                    yield break;
+                }
+
+                ApplyUniqueSatelliteLayerToTerrain(t, sat);
+            }
+
+            if (setNeighborsAfterBuild)
+            {
+                ApplyUnityNeighborsForForeground(terrains);
+                TrySetCenterNeighbors(terrains);
+            }
+
+            if (stitchForegroundEdges)
+                StitchForegroundEdges(terrains);
+
+            Debug.Log("[EidoMap] Foreground neighbors complete.");
+        }
+
+        private IEnumerator DownloadSatelliteTextureForBounds(AoiBounds b, int sizePx, Action<Texture2D> onDone)
+        {
+            // Use the exact style you use for your center capture if different.
+            // This default is Mapbox satellite.
+            const string style = "mapbox/satellite-v9";
+
+            string bbox =
+                $"{b.minLon.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                $"{b.minLat.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                $"{b.maxLon.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                $"{b.maxLat.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+            string url =
+                $"https://api.mapbox.com/styles/v1/{style}/static/" +
+                $"[{bbox}]/{sizePx}x{sizePx}?access_token={mapboxAccessToken}";
+
+            using (var req = UnityWebRequestTexture.GetTexture(url, true))
+            {
+                yield return req.SendWebRequest();
+
+                if (req.result != UnityWebRequest.Result.Success)
+                {
+                    Debug.LogWarning($"[EidoMap] Satellite download failed: {req.error}");
+                    onDone?.Invoke(null);
+                    yield break;
+                }
+
+                var tex = DownloadHandlerTexture.GetContent(req);
+                if (!tex)
+                {
+                    onDone?.Invoke(null);
+                    yield break;
+                }
+
+                tex.wrapMode = TextureWrapMode.Clamp;
+                tex.filterMode = FilterMode.Bilinear;
+
+                onDone?.Invoke(tex);
             }
         }
 
-        yield return null;
-    }
-}
+        private void ApplyUniqueSatelliteLayerToTerrain(Terrain t, Texture2D sat)
+        {
+            if (!t || !t.terrainData || !sat) return;
+
+            var td = t.terrainData;
+
+            var layer = new TerrainLayer();
+
+            layer.diffuseTexture = sat;
+            layer.tileSize = new Vector2(td.size.x, td.size.z);
+            layer.tileOffset = Vector2.zero;
+
+            td.terrainLayers = new[] { layer };
+            td.SetBaseMapDirty();
+            t.Flush();
+        }
+
+
+        private IEnumerator DebugLockForegroundForSeconds(
+            Transform root,
+            float tileW,
+            float tileH,
+            float seconds)
+        {
+            float tEnd = Time.time + seconds;
+
+            // Snapshot initial parent scale (if this changes, everything shifts).
+            Vector3 parentScale0 = root.lossyScale;
+
+            while (Time.time < tEnd)
+            {
+                if (!root) yield break;
+
+                // If parent scale changes over time, it will cause “overlap” symptoms.
+                if ((root.lossyScale - parentScale0).sqrMagnitude > 0.000001f)
+                {
+                    Debug.LogWarning($"[EidoMap] Foreground parent lossyScale changed: {parentScale0} -> {root.lossyScale}");
+                    parentScale0 = root.lossyScale;
+                }
+
+                for (int i = 0; i < root.childCount; i++)
+                {
+                    var child = root.GetChild(i);
+                    if (!child) continue;
+
+                    var terr = child.GetComponent<Terrain>();
+                    if (!terr || !terr.terrainData) continue;
+
+                    // Name format: Tile_gx_gz
+                    // Only lock if it matches expected.
+                    string n = child.name;
+                    if (!n.StartsWith("Tile_")) continue;
+
+                    // Parse gx/gz
+                    // Tile_-1_0
+                    var parts = n.Split('_');
+                    if (parts.Length != 3) continue;
+                    if (!int.TryParse(parts[1], out int gx)) continue;
+                    if (!int.TryParse(parts[2], out int gz)) continue;
+
+                    // Hard-lock position
+                    Vector3 wantedPos = new Vector3(gx * tileW, 0f, gz * tileH);
+                    if ((child.localPosition - wantedPos).sqrMagnitude > 0.0001f)
+                    {
+                        Debug.LogWarning($"[EidoMap] Tile {n} moved: {child.localPosition} -> {wantedPos}");
+                        child.localPosition = wantedPos;
+                    }
+
+                    // Hard-lock size (X/Z only)
+                    var td = terr.terrainData;
+                    var sz = td.size;
+                    if (Mathf.Abs(sz.x - tileW) > 0.01f || Mathf.Abs(sz.z - tileH) > 0.01f)
+                    {
+                        Debug.LogWarning($"[EidoMap] Tile {n} size changed: {sz} -> ({tileW}, {sz.y}, {tileH})");
+                        td.size = new Vector3(tileW, sz.y, tileH);
+                    }
+                }
+
+                yield return null;
+            }
+        }
 
 
         private Transform GetOrCreateForegroundRoot()
@@ -363,19 +376,27 @@ private IEnumerator DebugLockForegroundForSeconds(
 
         private static string TileName(NeighborKey k) => $"Tile_{k.gx}_{k.gz}";
 
-        private Terrain CreateNeighborTerrain(Transform root, NeighborKey key, float aoiWidthMeters, float aoiHeightMeters)
+        private Terrain CreateNeighborTerrain(
+           Transform root,
+           NeighborKey key,
+           float aoiWidthMeters,
+           float aoiHeightMeters,
+           float yMeters,
+           int heightRes)
         {
-          int res = ClampPow2Plus1(terrainHeightmapResolution);
+            int res = ClampPow2Plus1(terrainHeightmapResolution);
 
-            var td = new TerrainData();
-            td.name = $"Terrain {TileName(key)} Data";
-            td.heightmapResolution = res;
+            var td = new TerrainData
+            {
+                name = $"Terrain {TileName(key)} Data",
+                heightmapResolution = heightRes,
 
-            td.size = new Vector3(
-                Mathf.Max(1f, aoiWidthMeters),
-                Mathf.Max(1f, neighborInitialYSizeMeters),
-                Mathf.Max(1f, aoiHeightMeters)
-            );
+                size = new Vector3(
+                    Mathf.Max(1f, aoiWidthMeters),
+                    Mathf.Max(1f, yMeters),
+                    Mathf.Max(1f, aoiHeightMeters)
+                )
+            };
 
             SetAllHeightsFlat(td, 0f);
             td.terrainLayers = Array.Empty<TerrainLayer>();
