@@ -3,6 +3,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Events;
 using UnityEngine.Networking;
 
 namespace EidoMap
@@ -28,11 +29,8 @@ namespace EidoMap
         [Tooltip("If true, force shared border heights to match exactly (removes cracks).")]
         [SerializeField] private bool stitchForegroundEdges = true;
 
-        [Tooltip("Neighbor tile Y size (meters). Temporary initial value before decode sets real range.")]
-        [SerializeField] private float neighborInitialYSizeMeters = 50f;
-
-        [Tooltip("If true, neighbor terrains get the same TerrainLayer tiling behavior once resized.")]
-        [SerializeField] private bool syncNeighborSatelliteTiling = true;
+         [Tooltip("Event that fires once all neighbor terrains have generated")]
+        [SerializeField] private UnityEvent OnComplete = new();
 
         private struct NeighborKey : IEquatable<NeighborKey>
         {
@@ -234,6 +232,7 @@ namespace EidoMap
                 StitchForegroundEdges(terrains);
 
             Debug.Log("[EidoMap] Foreground neighbors complete.");
+            OnComplete.Invoke();
         }
 
         private IEnumerator DownloadSatelliteTextureForBounds(AoiBounds b, int sizePx, Action<Texture2D> onDone)

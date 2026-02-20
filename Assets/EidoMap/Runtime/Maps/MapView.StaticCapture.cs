@@ -33,8 +33,7 @@ namespace EidoMap
 
                 _lastCapturedAoiTexture = tex;
 
-                Debug.Log($"[EidoMap] Static imagery OK: {tex.width}x{tex.height}");
-
+                
                 // Apply to Terrain if assigned.
                 ApplyCapturedTextureToTerrain(tex);
 
