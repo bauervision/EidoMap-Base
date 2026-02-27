@@ -1,8 +1,10 @@
 // Assets/EidoMap/Runtime/Maps/MapView.TerrainRgbTiles.cs
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
+using UnityEngine.UI;
 
 namespace EidoMap
 {
@@ -37,7 +39,7 @@ namespace EidoMap
         [SerializeField] private Transform runtimeTerrainRoot;
 
         [Tooltip("Name for the runtime-created terrain GameObject.")]
-        [SerializeField] private string runtimeTerrainName = "Terrain (Runtime)";
+        [SerializeField] private string runtimeTerrainName = "WorldTerrainRoot";
 
         [Tooltip("If true, we destroy any existing runtime terrain (same name) under runtimeTerrainRoot before creating a new one.")]
         [SerializeField] private bool destroyExistingRuntimeTerrain = true;
@@ -57,6 +59,17 @@ namespace EidoMap
 
         [Tooltip("If true, sample height from raw mosaic pixels (byte-accurate) instead of Texture2D GetPixel/Bilinear.")]
         [SerializeField] private bool sampleHeightFromRawPixels = true;
+
+        [Header("UI Progress (Height Build)")]
+        [SerializeField] private Slider progressSlider;
+
+        [SerializeField] private int progressExpectedTiles = 9; // center + 8 neighbors (ring=1)
+        [SerializeField] private bool resetProgressOnCapture = true;
+
+        // Runtime state for “count each terrain once per capture”
+        private int _progressCaptureEpoch = 0;
+        private int _progressDone = 0;
+        private readonly HashSet<int> _progressCountedTerrainIds = new();
 
         private TerrainData _originalTerrainData;
         private TerrainData _runtimeTerrainData;
@@ -192,6 +205,8 @@ namespace EidoMap
                 Debug.LogWarning("[EidoMap] Height capture enabled but no target Terrain is assigned and createTerrainIfMissing=false.");
                 return;
             }
+
+            BeginHeightProgress();
 
             int z = terrainRgbZoom;
             bool use2x = terrainRgbUse2xTiles;
@@ -633,7 +648,7 @@ namespace EidoMap
             // Helpful debug: meters per sample
             float mPerSampleX = widthMeters / (hmRes - 1);
             float mPerSampleZ = heightMeters / (hmRes - 1);
-            Debug.Log($"[EidoMap] meters/sample: {mPerSampleX:0.00} x {mPerSampleZ:0.00}");
+            // Debug.Log($"[EidoMap] meters/sample: {mPerSampleX:0.00} x {mPerSampleZ:0.00}");
 
             float[,] heights = new float[hmRes, hmRes];
 
@@ -684,13 +699,13 @@ namespace EidoMap
             }
 
             t.terrainData.SetHeights(0, 0, heights);
-
-            Debug.Log(
-                $"[EidoMap] Height OK. AOI meters(local): {aoiWidthMeters:0.0} x {aoiHeightMeters:0.0}, " +
-                $"AOI meters(used): {widthMeters:0.0} x {heightMeters:0.0}, " +
-                $"min/max: {minM:0.0}..{maxM:0.0}, hmRes: {hmRes}, z: {z}, tilePx: {tilePx}, " +
-                $"guardBand={terrainRgbGuardBandTiles}, raw={useRaw}, resizeXZ={resizeXZ}, forced={useForcedRange}"
-            );
+            TickHeightProgressForTerrain(t);
+            // Debug.Log(
+            //     $"[EidoMap] Height OK. AOI meters(local): {aoiWidthMeters:0.0} x {aoiHeightMeters:0.0}, " +
+            //     $"AOI meters(used): {widthMeters:0.0} x {heightMeters:0.0}, " +
+            //     $"min/max: {minM:0.0}..{maxM:0.0}, hmRes: {hmRes}, z: {z}, tilePx: {tilePx}, " +
+            //     $"guardBand={terrainRgbGuardBandTiles}, raw={useRaw}, resizeXZ={resizeXZ}, forced={useForcedRange}"
+            // );
         }
 
 
@@ -714,5 +729,39 @@ namespace EidoMap
             _originalTerrainData = null;
 #endif
         }
+
+
+        private void BeginHeightProgress()
+        {
+            _progressCaptureEpoch++;
+            _progressDone = 0;
+            _progressCountedTerrainIds.Clear();
+
+            if (!progressSlider) return;
+
+            if (resetProgressOnCapture)
+            {
+                progressSlider.minValue = 0f;
+                progressSlider.maxValue = Mathf.Max(1, progressExpectedTiles);
+                progressSlider.value = 0f;
+            }
+        }
+
+        private void TickHeightProgressForTerrain(Terrain t)
+        {
+            if (!progressSlider) return;
+            if (!t) return;
+
+            int id = t.GetInstanceID();
+            if (_progressCountedTerrainIds.Contains(id))
+                return;
+
+            _progressCountedTerrainIds.Add(id);
+
+            _progressDone = Mathf.Min(_progressDone + 1, Mathf.Max(1, progressExpectedTiles));
+            progressSlider.value = _progressDone;
+        }
+
+
     }
 }

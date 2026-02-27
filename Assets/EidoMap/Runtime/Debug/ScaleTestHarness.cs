@@ -89,10 +89,8 @@ namespace EidoMap
 
         private Terrain ResolveTerrain()
         {
-            if (terrain && terrain.terrainData) return terrain;
-
-            // Prefer the MapView’s pipeline terrain if available
-            if (mapView)
+            if (mapView.targetTerrain && mapView.targetTerrain.terrainData) return mapView.targetTerrain;
+            else
             {
                 // MapView creates/assigns targetTerrain internally. We can find it by searching.
                 // If you expose targetTerrain publicly later, we can switch to a direct reference.

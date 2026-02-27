@@ -177,17 +177,6 @@ namespace EidoMap
             RebuildTiles();
         }
 
-        /* ---------------- AOI -> Lat/Lon Bounds ---------------- */
-
-
-
-
-
-
-
-
-
-
 
     }
 }
