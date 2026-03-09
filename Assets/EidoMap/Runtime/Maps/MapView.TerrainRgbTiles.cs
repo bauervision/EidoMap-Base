@@ -149,7 +149,7 @@ namespace EidoMap
             _originalTerrainData = null;
             _runtimeTerrainData = null;
 
-            Debug.Log("[EidoMap] Created fresh runtime Terrain.");
+//            Debug.Log("[EidoMap] Created fresh runtime Terrain.");
             return t;
         }
 
@@ -628,7 +628,7 @@ namespace EidoMap
             {
                 _lastCenterMinMeters = minM;
                 _lastCenterRangeMeters = range;
-                Debug.Log($"[EidoMap] Center mapping: min={_lastCenterMinMeters:0.0} range={_lastCenterRangeMeters:0.0}");
+                //Debug.Log($"[EidoMap] Center mapping: min={_lastCenterMinMeters:0.0} range={_lastCenterRangeMeters:0.0}");
             }
 
             // Phase Charlie: neighbors should not resize X/Z (to prevent drift/overlap). Y can still be updated via range.

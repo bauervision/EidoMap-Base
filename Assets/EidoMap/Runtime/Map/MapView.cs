@@ -119,6 +119,11 @@ namespace EidoMap
         public bool deferredTrim = true;        // delay trimming to avoid flicker
         public float trimDelaySeconds = 0.35f;
 
+        [Header("Segmentation")]
+        [SerializeField] private bool runSegmentationOnCapture = true;
+        [SerializeField] private EidoMap.Runtime.Terrain.Ai.SegmentationRunner segmentationRunner;
+
+
         private Canvas _rootCanvas;
         private Camera _uiCam;
         private TileViewPool _tilePool;

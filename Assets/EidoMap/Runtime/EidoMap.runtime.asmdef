@@ -2,7 +2,8 @@
     "name": "EidoMap.Runtime",
     "rootNamespace": "",
     "references": [
-        "Unity.TextMeshPro"
+        "Unity.TextMeshPro",
+        "Unity.InferenceEngine"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

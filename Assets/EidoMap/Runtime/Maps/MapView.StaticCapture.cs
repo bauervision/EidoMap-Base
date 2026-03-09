@@ -10,6 +10,7 @@ namespace EidoMap
     {
         private Texture2D _lastCapturedAoiTexture;
 
+        //Called from the Capture button on the UI
         public void CaptureAoiStaticImagery()
         {
             if (!useMapbox)
@@ -33,7 +34,18 @@ namespace EidoMap
 
                 _lastCapturedAoiTexture = tex;
 
-                
+                if (runSegmentationOnCapture && segmentationRunner != null)
+                {
+                    segmentationRunner.RunPreview(tex);
+                }
+
+                // Apply to Terrain if assigned.
+                ApplyCapturedTextureToTerrain(tex);
+
+                // Chain: Terrain-RGB → apply height (if enabled + terrain assigned).
+                CaptureAoiTerrainHeight(b);
+
+
                 // Apply to Terrain if assigned.
                 ApplyCapturedTextureToTerrain(tex);
 

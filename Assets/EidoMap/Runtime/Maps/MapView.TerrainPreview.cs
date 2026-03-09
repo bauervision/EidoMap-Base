@@ -56,7 +56,7 @@ namespace EidoMap
             td.SetBaseMapDirty();
             t.Flush();
 
-            Debug.Log($"[EidoMap] Applied AOI imagery to Terrain. tex={tex.width}x{tex.height} tileSize={layer.tileSize}");
+           // Debug.Log($"[EidoMap] Applied AOI imagery to Terrain. tex={tex.width}x{tex.height} tileSize={layer.tileSize}");
         }
     }
 }

@@ -231,7 +231,7 @@ namespace EidoMap
             if (stitchForegroundEdges)
                 StitchForegroundEdges(terrains);
 
-            Debug.Log("[EidoMap] Foreground neighbors complete.");
+            //Debug.Log("[EidoMap] Foreground neighbors complete.");
             OnComplete.Invoke();
         }
 

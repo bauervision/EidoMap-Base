@@ -110,7 +110,7 @@ namespace EidoMap
             {
                 var cursorPxNew = CursorPixelFromCenterPx(_centerPx, local);
                 var (latNew, lonNew) = TileMath.PixelToLatLon(cursorPxNew.x, cursorPxNew.y, zNew);
-                Debug.Log($"[EidoMap:CursorGeo POST] z={zNew} lat={latNew:0.000000} lon={lonNew:0.000000}");
+                // Debug.Log($"[EidoMap:CursorGeo POST] z={zNew} lat={latNew:0.000000} lon={lonNew:0.000000}");
             }
 
 
