@@ -14,7 +14,7 @@ namespace EidoMap.Runtime.Terrain.Ai
 
         [Header("Debug")]
         [SerializeField] private RawImage debugPreviewImage;
-        [SerializeField] private bool showResizedInputPreview = true;
+
         private Model _runtimeModel;
         private Worker _worker;
 
@@ -45,43 +45,125 @@ namespace EidoMap.Runtime.Terrain.Ai
                 return;
             }
 
-            const int modelSize = 520;
+            const int modelSize = 512;
+            const int tileCountPerAxis = 10;
+            const int tileMaskSize = 128;
+            const int combinedSize = tileMaskSize * tileCountPerAxis;
+            const int classCount = 8;
 
-            using var input = new Tensor<float>(new TensorShape(1, 3, modelSize, modelSize));
+            var resizedSource = BuildResizedPreviewTexture(sourceTexture, modelSize, modelSize);
+            int tileSourceSize = modelSize / tileCountPerAxis;
 
-            if (showResizedInputPreview && debugPreviewImage != null)
+            var combinedLogits = new float[classCount * combinedSize * combinedSize];
+            var combinedWeights = new float[combinedSize * combinedSize];
+            var allSeen = new System.Collections.Generic.HashSet<int>();
+
+            for (int tileY = 0; tileY < tileCountPerAxis; tileY++)
             {
-                var preview = BuildResizedPreviewTexture(sourceTexture, modelSize, modelSize);
+                for (int tileX = 0; tileX < tileCountPerAxis; tileX++)
+                {
+                    int cropX = tileX * tileSourceSize;
+                    int cropY = modelSize - ((tileY + 1) * tileSourceSize);
+
+                    var tileSource = CropTexture(resizedSource, cropX, cropY, tileSourceSize, tileSourceSize);
+                    var tileForModel = BuildResizedPreviewTexture(tileSource, modelSize, modelSize);
+
+                    using var input = new Tensor<float>(new TensorShape(1, 3, modelSize, modelSize));
+                    FillInputTensorNormalized(tileForModel, input, modelSize, modelSize);
+
+                    _worker.Schedule(input);
+
+                    var rawOutput = _worker.PeekOutput("logits");
+                    if (rawOutput == null)
+                    {
+                        Debug.LogWarning($"[EidoMap] PeekOutput(\"logits\") returned null for tile ({tileX}, {tileY}).");
+                        Destroy(tileForModel);
+                        Destroy(tileSource);
+                        continue;
+                    }
+
+                    var output = rawOutput as Tensor<float>;
+                    if (output == null)
+                    {
+                        Debug.LogWarning($"[EidoMap] Output 'logits' was not Tensor<float> for tile ({tileX}, {tileY}). Actual type: {rawOutput.GetType().FullName}");
+                        Destroy(tileForModel);
+                        Destroy(tileSource);
+                        continue;
+                    }
+
+                    using var cpuOutput = output.ReadbackAndClone();
+
+                    if (tileX == 0 && tileY == 0)
+                    {
+                        Debug.Log($"[EidoMap] Logits shape: {cpuOutput.shape}");
+                    }
+
+                    int destX = tileX * tileMaskSize;
+                    int destY = (tileCountPerAxis - 1 - tileY) * tileMaskSize;
+
+                    AccumulateLogits(
+                        cpuOutput,
+                        combinedLogits,
+                        combinedWeights,
+                        combinedSize,
+                        combinedSize,
+                        destX,
+                        destY);
+
+                    Destroy(tileForModel);
+                    Destroy(tileSource);
+                }
+            }
+
+            var combinedMask = BuildDebugMaskTextureFromCombinedLogits(
+                combinedLogits,
+                combinedWeights,
+                classCount,
+                combinedSize,
+                combinedSize,
+                allSeen);
+
+            if (debugPreviewImage != null)
+            {
+                var preview = BuildResizedPreviewTexture(combinedMask, modelSize, modelSize);
                 debugPreviewImage.texture = preview;
             }
-            
-            TextureConverter.ToTensor(sourceTexture, input, new TextureTransform());
 
-            _worker.Schedule(input);
+            Debug.Log($"[EidoMap] Classes seen: {string.Join(", ", allSeen)}");
+            Debug.Log($"[EidoMap] Debug mask built: {combinedMask.width}x{combinedMask.height}");
 
-            var rawOutput = _worker.PeekOutput("mask");
-            if (rawOutput == null)
-            {
-                Debug.LogWarning("[EidoMap] PeekOutput(\"mask\") returned null.");
-                return;
-            }
-
-            var output = rawOutput as Tensor<int>;
-            if (output == null)
-            {
-                Debug.LogWarning($"[EidoMap] Output 'mask' was not Tensor<int>. Actual type: {rawOutput.GetType().FullName}");
-                return;
-            }
-
-            using var cpuOutput = output.ReadbackAndClone();
-
-            Debug.Log($"[EidoMap] Output shape: {cpuOutput.shape}");
-
-            var maskTexture = BuildDebugMaskTexture(cpuOutput, modelSize, modelSize);
-
-            Debug.Log($"[EidoMap] Debug mask built: {maskTexture.width}x{maskTexture.height}");
+            Destroy(combinedMask);
+            Destroy(resizedSource);
         }
 
+
+        private void CollectSeenClassesFromLogits(Tensor<float> logitsTensor, System.Collections.Generic.HashSet<int> seen)
+        {
+            int classCount = logitsTensor.shape[1];
+            int height = logitsTensor.shape[2];
+            int width = logitsTensor.shape[3];
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int bestClass = 0;
+                    float bestScore = logitsTensor[0, 0, y, x];
+
+                    for (int c = 1; c < classCount; c++)
+                    {
+                        float score = logitsTensor[0, c, y, x];
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
+                            bestClass = c;
+                        }
+                    }
+
+                    seen.Add(bestClass);
+                }
+            }
+        }
         private void InitializeWorker()
         {
             DisposeWorker();
@@ -113,8 +195,24 @@ namespace EidoMap.Runtime.Terrain.Ai
             _runtimeModel = null;
         }
 
-        private Texture2D BuildDebugMaskTexture(Tensor<int> maskTensor, int width, int height)
+
+        private Texture2D CropTexture(Texture2D source, int x, int y, int width, int height)
         {
+            var pixels = source.GetPixels(x, y, width, height);
+
+            var tex = new Texture2D(width, height, TextureFormat.RGBA32, false, false);
+            tex.SetPixels(pixels);
+            tex.Apply(false, false);
+
+            return tex;
+        }
+
+        private Texture2D BuildDebugMaskTextureFromLogits(Tensor<float> logitsTensor)
+        {
+            int classCount = logitsTensor.shape[1];
+            int height = logitsTensor.shape[2];
+            int width = logitsTensor.shape[3];
+
             var tex = new Texture2D(width, height, TextureFormat.RGBA32, false, false);
             tex.wrapMode = TextureWrapMode.Clamp;
             tex.filterMode = FilterMode.Point;
@@ -126,11 +224,23 @@ namespace EidoMap.Runtime.Terrain.Ai
             {
                 for (int x = 0; x < width; x++)
                 {
-                    int classId = maskTensor[0, y, x];
-                    seen.Add(classId);
+                    int bestClass = 0;
+                    float bestScore = logitsTensor[0, 0, y, x];
+
+                    for (int c = 1; c < classCount; c++)
+                    {
+                        float score = logitsTensor[0, c, y, x];
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
+                            bestClass = c;
+                        }
+                    }
+
+                    seen.Add(bestClass);
 
                     int i = y * width + x;
-                    pixels[i] = ColorForClass(classId);
+                    pixels[i] = ColorForClass(bestClass);
                 }
             }
 
@@ -142,6 +252,38 @@ namespace EidoMap.Runtime.Terrain.Ai
             return tex;
         }
 
+        private void FillInputTensorNormalized(Texture sourceTexture, Tensor<float> input, int width, int height)
+        {
+            var resized = BuildResizedPreviewTexture(sourceTexture, width, height);
+            var pixels = resized.GetPixels32();
+
+            const float meanR = 0.485f;
+            const float meanG = 0.456f;
+            const float meanB = 0.406f;
+
+            const float stdR = 0.229f;
+            const float stdG = 0.224f;
+            const float stdB = 0.225f;
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int i = y * width + x;
+                    Color32 p = pixels[i];
+
+                    float r = p.r / 255f;
+                    float g = p.g / 255f;
+                    float b = p.b / 255f;
+
+                    input[0, 0, y, x] = (r - meanR) / stdR;
+                    input[0, 1, y, x] = (g - meanG) / stdG;
+                    input[0, 2, y, x] = (b - meanB) / stdB;
+                }
+            }
+
+            Destroy(resized);
+        }
         private static Color32 ColorForClass(int classId)
         {
             return classId switch
@@ -189,5 +331,94 @@ namespace EidoMap.Runtime.Terrain.Ai
 
             return tex;
         }
+
+        private void AccumulateLogits(
+    Tensor<float> tileLogits,
+    float[] combinedLogits,
+    float[] combinedWeights,
+    int combinedWidth,
+    int combinedHeight,
+    int destX,
+    int destY)
+        {
+            int classCount = tileLogits.shape[1];
+            int tileHeight = tileLogits.shape[2];
+            int tileWidth = tileLogits.shape[3];
+
+            for (int y = 0; y < tileHeight; y++)
+            {
+                for (int x = 0; x < tileWidth; x++)
+                {
+                    int outX = destX + x;
+                    int outY = destY + y;
+
+                    if (outX < 0 || outX >= combinedWidth || outY < 0 || outY >= combinedHeight)
+                    {
+                        continue;
+                    }
+
+                    int pixelIndex = outY * combinedWidth + outX;
+                    combinedWeights[pixelIndex] += 1f;
+
+                    for (int c = 0; c < classCount; c++)
+                    {
+                        int logitsIndex = ((c * combinedHeight + outY) * combinedWidth) + outX;
+                        combinedLogits[logitsIndex] += tileLogits[0, c, y, x];
+                    }
+                }
+            }
+        }
+
+        private Texture2D BuildDebugMaskTextureFromCombinedLogits(
+    float[] combinedLogits,
+    float[] combinedWeights,
+    int classCount,
+    int width,
+    int height,
+    System.Collections.Generic.HashSet<int> seen)
+        {
+            var tex = new Texture2D(width, height, TextureFormat.RGBA32, false, false);
+            tex.wrapMode = TextureWrapMode.Clamp;
+            tex.filterMode = FilterMode.Point;
+
+            var pixels = new Color32[width * height];
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int pixelIndex = y * width + x;
+                    float weight = combinedWeights[pixelIndex];
+
+                    int bestClass = 0;
+                    float bestScore = float.NegativeInfinity;
+
+                    for (int c = 0; c < classCount; c++)
+                    {
+                        int logitsIndex = ((c * height + y) * width) + x;
+                        float score = weight > 0f
+                            ? combinedLogits[logitsIndex] / weight
+                            : float.NegativeInfinity;
+
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
+                            bestClass = c;
+                        }
+                    }
+
+                    seen.Add(bestClass);
+                    pixels[pixelIndex] = ColorForClass(bestClass);
+                }
+            }
+
+            tex.SetPixels32(pixels);
+            tex.Apply(false, false);
+
+            return tex;
+        }
+
+
+
     }
 }
