@@ -74,6 +74,7 @@ UCBDownload/
 # JetBrains Rider plugin
 Assets/TextMesh Pro
 
+*.onnx
 # Generated meta cache (keep .meta files next to assets!)
 # NOTE: Do NOT ignore *.meta — Unity needs them for GUIDs.
 # *.meta  <-- DO NOT ADD THIS
