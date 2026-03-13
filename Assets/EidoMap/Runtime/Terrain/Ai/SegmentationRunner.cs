@@ -14,6 +14,8 @@ namespace EidoMap.Runtime.Terrain.Ai
 
         [Header("Debug")]
         [SerializeField] private RawImage debugPreviewImage;
+        [SerializeField] private bool isolateSingleClass = false;
+        [SerializeField][Range(0, 7)] private int isolatedClassId = 4;
 
         private Model _runtimeModel;
         private Worker _worker;
@@ -46,26 +48,64 @@ namespace EidoMap.Runtime.Terrain.Ai
             }
 
             const int modelSize = 512;
-            const int tileCountPerAxis = 10;
-            const int tileMaskSize = 128;
-            const int combinedSize = tileMaskSize * tileCountPerAxis;
-            const int classCount = 8;
+            const int tileCountPerAxis = 4;
+            const int debugPreviewSize = 512;
 
-            var resizedSource = BuildResizedPreviewTexture(sourceTexture, modelSize, modelSize);
-            int tileSourceSize = modelSize / tileCountPerAxis;
+            int sourceWidth = sourceTexture.width;
+            int sourceHeight = sourceTexture.height;
 
-            var combinedLogits = new float[classCount * combinedSize * combinedSize];
-            var combinedWeights = new float[combinedSize * combinedSize];
+            int tileSourceWidth = sourceWidth / tileCountPerAxis;
+            int tileSourceHeight = sourceHeight / tileCountPerAxis;
+
+            if (tileSourceWidth <= 0 || tileSourceHeight <= 0)
+            {
+                Debug.LogWarning(
+                    $"[EidoMap] Invalid tile size from source texture {sourceWidth}x{sourceHeight} " +
+                    $"with tileCountPerAxis={tileCountPerAxis}.");
+                return;
+            }
+
+            Debug.Log(
+                $"[EidoMap] RunPreview source={sourceWidth}x{sourceHeight}, " +
+                $"tiles={tileCountPerAxis}x{tileCountPerAxis}, " +
+                $"tileSource={tileSourceWidth}x{tileSourceHeight}, modelInput={modelSize}x{modelSize}");
+
+            float[] combinedLogits = null;
+            float[] combinedWeights = null;
+            int classCount = -1;
+            int tileMaskWidth = -1;
+            int tileMaskHeight = -1;
+            int combinedWidth = -1;
+            int combinedHeight = -1;
+
             var allSeen = new System.Collections.Generic.HashSet<int>();
 
             for (int tileY = 0; tileY < tileCountPerAxis; tileY++)
             {
                 for (int tileX = 0; tileX < tileCountPerAxis; tileX++)
                 {
-                    int cropX = tileX * tileSourceSize;
-                    int cropY = modelSize - ((tileY + 1) * tileSourceSize);
+                    int cropX = tileX * tileSourceWidth;
 
-                    var tileSource = CropTexture(resizedSource, cropX, cropY, tileSourceSize, tileSourceSize);
+                    int cropYTopBased = tileY * tileSourceHeight;
+                    int cropY = sourceHeight - cropYTopBased - tileSourceHeight;
+
+                    int cropWidth = (tileX == tileCountPerAxis - 1)
+                        ? (sourceWidth - cropX)
+                        : tileSourceWidth;
+
+                    int cropHeight = (tileY == tileCountPerAxis - 1)
+                        ? (sourceHeight - cropYTopBased)
+                        : tileSourceHeight;
+
+                    if (cropWidth <= 0 || cropHeight <= 0)
+                    {
+                        Debug.LogWarning(
+                            $"[EidoMap] Skipping invalid crop for tile ({tileX}, {tileY}) " +
+                            $"at ({cropX}, {cropY}) size={cropWidth}x{cropHeight}");
+                        continue;
+                    }
+
+                    var tileSource = CropTexture(sourceTexture, cropX, cropY, cropWidth, cropHeight);
                     var tileForModel = BuildResizedPreviewTexture(tileSource, modelSize, modelSize);
 
                     using var input = new Tensor<float>(new TensorShape(1, 3, modelSize, modelSize));
@@ -85,7 +125,9 @@ namespace EidoMap.Runtime.Terrain.Ai
                     var output = rawOutput as Tensor<float>;
                     if (output == null)
                     {
-                        Debug.LogWarning($"[EidoMap] Output 'logits' was not Tensor<float> for tile ({tileX}, {tileY}). Actual type: {rawOutput.GetType().FullName}");
+                        Debug.LogWarning(
+                            $"[EidoMap] Output 'logits' was not Tensor<float> for tile ({tileX}, {tileY}). " +
+                            $"Actual type: {rawOutput.GetType().FullName}");
                         Destroy(tileForModel);
                         Destroy(tileSource);
                         continue;
@@ -98,15 +140,58 @@ namespace EidoMap.Runtime.Terrain.Ai
                         Debug.Log($"[EidoMap] Logits shape: {cpuOutput.shape}");
                     }
 
-                    int destX = tileX * tileMaskSize;
-                    int destY = (tileCountPerAxis - 1 - tileY) * tileMaskSize;
+                    if (cpuOutput.shape.rank != 4)
+                    {
+                        Debug.LogWarning(
+                            $"[EidoMap] Expected 4D logits tensor, got rank {cpuOutput.shape.rank} " +
+                            $"for tile ({tileX}, {tileY}).");
+                        Destroy(tileForModel);
+                        Destroy(tileSource);
+                        continue;
+                    }
+
+                    int outputClassCount = cpuOutput.shape[1];
+                    int outputHeight = cpuOutput.shape[2];
+                    int outputWidth = cpuOutput.shape[3];
+
+                    if (combinedLogits == null)
+                    {
+                        classCount = outputClassCount;
+                        tileMaskWidth = outputWidth;
+                        tileMaskHeight = outputHeight;
+                        combinedWidth = tileMaskWidth * tileCountPerAxis;
+                        combinedHeight = tileMaskHeight * tileCountPerAxis;
+
+                        combinedLogits = new float[classCount * combinedWidth * combinedHeight];
+                        combinedWeights = new float[combinedWidth * combinedHeight];
+
+                        Debug.Log(
+                            $"[EidoMap] Combined mask initialized. classes={classCount}, " +
+                            $"tileMask={tileMaskWidth}x{tileMaskHeight}, combined={combinedWidth}x{combinedHeight}");
+                    }
+                    else
+                    {
+                        if (outputClassCount != classCount || outputWidth != tileMaskWidth || outputHeight != tileMaskHeight)
+                        {
+                            Debug.LogWarning(
+                                $"[EidoMap] Output shape mismatch at tile ({tileX}, {tileY}). " +
+                                $"Expected classes={classCount}, size={tileMaskWidth}x{tileMaskHeight} but got " +
+                                $"classes={outputClassCount}, size={outputWidth}x{outputHeight}");
+                            Destroy(tileForModel);
+                            Destroy(tileSource);
+                            continue;
+                        }
+                    }
+
+                    int destX = tileX * tileMaskWidth;
+                    int destY = (tileCountPerAxis - 1 - tileY) * tileMaskHeight;
 
                     AccumulateLogits(
                         cpuOutput,
                         combinedLogits,
                         combinedWeights,
-                        combinedSize,
-                        combinedSize,
+                        combinedWidth,
+                        combinedHeight,
                         destX,
                         destY);
 
@@ -115,17 +200,23 @@ namespace EidoMap.Runtime.Terrain.Ai
                 }
             }
 
+            if (combinedLogits == null || combinedWeights == null)
+            {
+                Debug.LogWarning("[EidoMap] No valid logits were accumulated. Debug mask was not built.");
+                return;
+            }
+
             var combinedMask = BuildDebugMaskTextureFromCombinedLogits(
                 combinedLogits,
                 combinedWeights,
                 classCount,
-                combinedSize,
-                combinedSize,
+                combinedWidth,
+                combinedHeight,
                 allSeen);
 
             if (debugPreviewImage != null)
             {
-                var preview = BuildResizedPreviewTexture(combinedMask, modelSize, modelSize);
+                var preview = BuildResizedPreviewTexture(combinedMask, debugPreviewSize, debugPreviewSize);
                 debugPreviewImage.texture = preview;
             }
 
@@ -133,7 +224,6 @@ namespace EidoMap.Runtime.Terrain.Ai
             Debug.Log($"[EidoMap] Debug mask built: {combinedMask.width}x{combinedMask.height}");
 
             Destroy(combinedMask);
-            Destroy(resizedSource);
         }
 
 
@@ -288,28 +378,15 @@ namespace EidoMap.Runtime.Terrain.Ai
         {
             return classId switch
             {
-                0 => new Color32(0, 0, 0, 255),
-                1 => new Color32(255, 0, 0, 255),
-                2 => new Color32(0, 255, 0, 255),
-                3 => new Color32(0, 0, 255, 255),
-                4 => new Color32(255, 255, 0, 255),
-                5 => new Color32(255, 0, 255, 255),
-                6 => new Color32(0, 255, 255, 255),
-                7 => new Color32(255, 128, 0, 255),
-                8 => new Color32(128, 0, 255, 255),
-                9 => new Color32(0, 128, 255, 255),
-                10 => new Color32(128, 255, 0, 255),
-                11 => new Color32(255, 0, 128, 255),
-                12 => new Color32(128, 128, 128, 255),
-                13 => new Color32(255, 255, 255, 255),
-                14 => new Color32(64, 255, 64, 255),
-                15 => new Color32(255, 64, 64, 255),
-                16 => new Color32(64, 64, 255, 255),
-                17 => new Color32(255, 192, 64, 255),
-                18 => new Color32(192, 64, 255, 255),
-                19 => new Color32(64, 255, 192, 255),
-                20 => new Color32(192, 192, 0, 255),
-                _ => new Color32(32, 32, 32, 255),
+                0 => new Color32(24, 24, 24, 255),      // Ignore
+                1 => new Color32(110, 110, 110, 255),   // Background
+                2 => new Color32(220, 60, 60, 255),     // Building
+                3 => new Color32(35, 35, 35, 255),      // Road
+                4 => new Color32(70, 150, 255, 255),    // Water
+                5 => new Color32(194, 160, 102, 255),   // Barren
+                6 => new Color32(34, 139, 34, 255),     // Forest
+                7 => new Color32(144, 238, 144, 255),   // Agricultural
+                _ => new Color32(255, 0, 255, 255),
             };
         }
 
@@ -408,7 +485,17 @@ namespace EidoMap.Runtime.Terrain.Ai
                     }
 
                     seen.Add(bestClass);
-                    pixels[pixelIndex] = ColorForClass(bestClass);
+
+                    if (isolateSingleClass)
+                    {
+                        pixels[pixelIndex] = bestClass == isolatedClassId
+                            ? ColorForClass(bestClass)
+                            : new Color32(40, 40, 40, 255);
+                    }
+                    else
+                    {
+                        pixels[pixelIndex] = ColorForClass(bestClass);
+                    }
                 }
             }
 
@@ -417,7 +504,6 @@ namespace EidoMap.Runtime.Terrain.Ai
 
             return tex;
         }
-
 
 
     }

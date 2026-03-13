@@ -1929,6 +1929,8 @@ MonoBehaviour:
   modelAsset: {fileID: 5022602860645237092, guid: 32dcc78dbc035a140953e819d0057aef, type: 3}
   backend: 256
   debugPreviewImage: {fileID: 1208621597}
+  isolateSingleClass: 1
+  isolatedClassId: 7
 --- !u!4 &737301633
 Transform:
   m_ObjectHideFlags: 0
